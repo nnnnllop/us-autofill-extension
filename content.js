@@ -10,7 +10,7 @@ const MSG_SOURCE = "US_AUTOFILL_V2";
 const IS_TOP_FRAME = window === window.top;
 
 const STRIPE_HOST_RE = /(?:^|\.)stripe\.com$/i;
-const STRIPE_CHECKOUT_RE = /^checkout\.stripe\.com$|^buy\.stripe\.com$/i;
+const STRIPE_CHECKOUT_RE = /^checkout\.stripe\.(com|dev)$|^buy\.stripe\.com$/i;
 const STRIPE_IFRAME_RE = /^js\.stripe\.com$|^elements\.stripe\.com$|^hooks\.stripe\.com$/i;
 
 const FIELD_LABELS = {
@@ -212,21 +212,31 @@ chrome.storage.onChanged.addListener((changes, area) => {
 });
 
 function isFillable(el) {
-  if (!el || el.disabled || el.readOnly) return false;
-  if (el.type === "hidden") return false;
-  const style = window.getComputedStyle(el);
-  if (style.display === "none" || style.visibility === "hidden") return false;
-  if (el.offsetParent !== null) return true;
-  const rect = el.getBoundingClientRect();
-  return rect.width > 0 && rect.height > 0;
+  try {
+    if (!el || el.nodeType !== 1) return false;
+    if (el.disabled || el.readOnly) return false;
+    if (el.type === "hidden") return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden") return false;
+    if (el.offsetParent !== null) return true;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  } catch (_) {
+    return false;
+  }
 }
 
-function queryAllDeep(selector, root = document) {
+function queryAllDeep(selector, root = document, depth = 0) {
+  if (depth > 8 || !root?.querySelectorAll) return [];
   const out = [];
   try {
-    root.querySelectorAll(selector).forEach(el => { if (isFillable(el)) out.push(el); });
+    root.querySelectorAll(selector).forEach(el => {
+      try { if (isFillable(el)) out.push(el); } catch (_) {}
+    });
     root.querySelectorAll("*").forEach(el => {
-      if (el.shadowRoot) out.push(...queryAllDeep(selector, el.shadowRoot));
+      try {
+        if (el.shadowRoot) out.push(...queryAllDeep(selector, el.shadowRoot, depth + 1));
+      } catch (_) {}
     });
   } catch (_) {}
   return out;
@@ -358,15 +368,18 @@ function findStripeBillingField(key) {
   const ids = STRIPE_BILLING_IDS[key];
   if (!ids) return null;
   for (const id of ids) {
-    const candidates = [
-      document.getElementById(id),
-      document.querySelector(`input#${id}, select#${id}`),
-      document.querySelector(`[name="${id}"]`),
-      ...queryAllDeep(`#${id}, [name="${id}"]`)
-    ].filter(Boolean);
-    for (const el of candidates) {
-      if (isFillable(el)) return el;
-    }
+    try {
+      const safeId = CSS.escape(id);
+      const candidates = [
+        document.getElementById(id),
+        document.querySelector(`input#${safeId}, select#${safeId}`),
+        document.querySelector(`[name="${safeId}"]`),
+        ...queryAllDeep(`#${safeId}, [name="${safeId}"]`, document, 0)
+      ].filter(Boolean);
+      for (const el of candidates) {
+        if (isFillable(el)) return el;
+      }
+    } catch (_) {}
   }
   return null;
 }
@@ -809,7 +822,8 @@ async function fillIframeFields(address, card, mode, report) {
 }
 
 function countFilledInReport(report) {
-  return report?.filter(r => r.status === "filled").length || 0;
+  if (!Array.isArray(report)) return 0;
+  return report.filter(r => r.status === "filled").length;
 }
 
 /* ───────────── Broadcast (top → iframes) ───────────── */
@@ -832,24 +846,33 @@ async function coordinatedIframeFill(address, card, mode) {
 }
 
 function finalizeIframeCardReport(report, platform) {
-  if (!["stripe", "paddle", "lemon"].includes(platform)) return;
-  const hasIframes = document.querySelector(
-    'iframe[src*="js.stripe.com"], iframe[name^="__privateStripeFrame"], iframe[src*="paddle"]'
-  );
-  if (!hasIframes) return;
-  for (const key of CARD_KEYS) {
-    const item = report.find(r => r.key === key);
-    if (item && item.status === "not_found") item.status = "iframe";
+  try {
+    if (!Array.isArray(report)) return;
+    if (!["stripe", "paddle", "lemon"].includes(platform)) return;
+    const hasIframes = document.querySelector(
+      'iframe[src*="js.stripe.com"], iframe[name^="__privateStripeFrame"], iframe[src*="paddle"]'
+    );
+    if (!hasIframes) return;
+    for (const key of CARD_KEYS) {
+      const item = report.find(r => r.key === key);
+      if (item && item.status === "not_found") item.status = "iframe";
+    }
+  } catch (err) {
+    warn("finalizeIframeCardReport:", err);
   }
 }
 
 function highlightMissedFields(report) {
-  document.querySelectorAll("[data-us-missed]").forEach(el => el.removeAttribute("data-us-missed"));
-  if (!report) return;
-  for (const item of report) {
-    if (item.status !== "not_found") continue;
-    const el = findField(item.key);
-    if (el) el.setAttribute("data-us-missed", "true");
+  try {
+    document.querySelectorAll("[data-us-missed]").forEach(el => el.removeAttribute("data-us-missed"));
+    if (!Array.isArray(report)) return;
+    for (const item of report) {
+      if (item.status !== "not_found") continue;
+      const el = findField(item.key);
+      if (el) el.setAttribute("data-us-missed", "true");
+    }
+  } catch (err) {
+    warn("highlightMissedFields:", err);
   }
 }
 
@@ -1054,7 +1077,14 @@ async function executeFillWithRetries(mode) {
         }
       }
 
-      const result = await autoFill(data.address, data.card, mode);
+      let result;
+      try {
+        result = await autoFill(data.address, data.card, mode);
+      } catch (err) {
+        warn("autoFill error:", err);
+        result = buildResult(0, createReport(mode), detectPlatform(), mode);
+      }
+      if (!result?.report) result = buildResult(0, createReport(mode), detectPlatform(), mode);
       const filledCount = countFilledInReport(result.report);
 
       if (!best || filledCount > countFilledInReport(best.report)) best = result;
@@ -1110,8 +1140,12 @@ function scheduleObserverFill() {
 window.addEventListener("message", async (event) => {
   if (event.data?.source !== MSG_SOURCE || event.data?.action !== "fill") return;
   if (IS_TOP_FRAME) return;
-  const { address, card, mode } = event.data;
-  await fillIframeFields(address, card, mode || "all", null);
+  try {
+    const { address, card, mode } = event.data;
+    await fillIframeFields(address, card, mode || "all", null);
+  } catch (err) {
+    warn("iframe message fill:", err);
+  }
 });
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
