@@ -17,14 +17,88 @@ let activeProfileId = "default";
 let addressPinned = false;
 let showProfileSummary = true;
 let onboardingDismissed = false;
+let cardPollCount = 0;
+const CARD_POLL_MAX = 40;
+const BG_TIMEOUT_MS = 15000;
+
+function sendBg(action, payload = {}, timeoutMs = BG_TIMEOUT_MS) {
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish({ error: "timeout" }), timeoutMs);
+    chrome.runtime.sendMessage({ action, ...payload }, res => {
+      if (chrome.runtime.lastError) {
+        finish({ error: chrome.runtime.lastError.message });
+        return;
+      }
+      finish(res ?? { error: "no_response" });
+    });
+  });
+}
 
 function dismissOnboarding() {
   onboardingDismissed = true;
   if (onboarding) onboarding.hidden = true;
   chrome.storage.local.set({ onboardingDone: true });
-  chrome.runtime.sendMessage({ action: "setSettings", onboardingDone: true }, () => {
-    void chrome.runtime.lastError;
+  sendBg("setSettings", { onboardingDone: true }, 5000);
+}
+
+function applySettings(settings) {
+  if (!settings) return;
+  if ($("soundMuteToggle")) $("soundMuteToggle").checked = !settings.soundMuted;
+  if ($("compactModeToggle")) $("compactModeToggle").checked = !!settings.compactMode;
+  if ($("stripeFabToggle")) $("stripeFabToggle").checked = settings.stripeFabEnabled !== false;
+  showProfileSummary = settings.showProfileSummary !== false;
+  if ($("showSummaryToggle")) $("showSummaryToggle").checked = showProfileSummary;
+  document.body.classList.toggle("compact-mode", !!settings.compactMode);
+  if (settings.onboardingDone) {
+    onboardingDismissed = true;
+    if (onboarding) onboarding.hidden = true;
+  } else if (onboarding && !onboardingDismissed) {
+    onboarding.hidden = false;
+  }
+}
+
+function renderCountriesList(countries, selectedCode) {
+  const sel = $("countrySelect");
+  if (!sel || !countries) return;
+  sel.innerHTML = "";
+  countries.forEach(c => {
+    const opt = document.createElement("option");
+    opt.value = c.code;
+    opt.textContent = `${c.flag} ${c.name}`;
+    if (c.code === selectedCode) opt.selected = true;
+    sel.appendChild(opt);
   });
+}
+
+function renderBinPresetsList(presets, activeBin) {
+  const el = $("binPresets");
+  if (!el || !presets) return;
+  el.innerHTML = "";
+  presets.forEach(p => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "bin-preset";
+    btn.dataset.bin = p.bin;
+    btn.textContent = p.short;
+    btn.title = `${p.label} — ${p.bin}`;
+    btn.addEventListener("click", () => {
+      if ($("binInput")) $("binInput").value = p.bin;
+      highlightBinPreset(p.bin);
+      sendBg("setBin", { bin: p.bin }).then(() => {
+        saveCurrentToProfile();
+        refreshCardOnly(true);
+      });
+    });
+    el.appendChild(btn);
+  });
+  if (activeBin) highlightBinPreset(activeBin);
 }
 
 const STATE_LABELS = {
@@ -378,105 +452,128 @@ function loadPinnedStatus() {
   });
 }
 
-function startCardPolling(onDone) {
+function stopCardPolling(onDone) {
   if (cardPollTimer) clearInterval(cardPollTimer);
+  cardPollTimer = null;
+  cardPollCount = 0;
+  if (onDone) onDone();
+}
+
+function startCardPolling(onDone) {
+  stopCardPolling();
   safeSetHTML("cardStatusBadge", '<span class="badge badge-loading">⏳</span><span id="cardStatusText">Проверка карты...</span>');
   safeSetStyle("cardStatusText", "color", "#94a3b8");
 
-  cardPollTimer = setInterval(() => {
-    chrome.runtime.sendMessage({ action: "getCardCache" }, res => {
-      if (chrome.runtime.lastError) {
-        clearInterval(cardPollTimer);
-        cardPollTimer = null;
-        if (onDone) onDone();
-        return;
-      }
-      const card = res?.card;
-      if (!card) return;
-      if (card.validationStatus === "checking") {
-        safeSetText("cardStatusText", card.validationMessage || "Проверка...");
-        return;
-      }
-      renderCard(card);
-      clearInterval(cardPollTimer);
-      cardPollTimer = null;
-      if (onDone) onDone();
-      setStatus("active", card.validated ? "Карта LIVE ✅" : "Карта готова");
-    });
+  cardPollTimer = setInterval(async () => {
+    cardPollCount++;
+    if (cardPollCount > CARD_POLL_MAX) {
+      stopCardPolling(onDone);
+      safeSetHTML("cardStatusBadge", '<span class="badge badge-unavailable">⏱</span><span id="cardStatusText">Проверка зависла — нажмите «Новая»</span>');
+      safeSetStyle("cardStatusText", "color", "#a855f7");
+      setStatus("error", "Проверка карты зависла");
+      return;
+    }
+
+    const res = await sendBg("getCardCache", {}, 5000);
+    if (res?.error) {
+      stopCardPolling(onDone);
+      setStatus("error", "Нет связи с расширением");
+      return;
+    }
+
+    const card = res?.card;
+    if (!card) return;
+    if (card.validationStatus === "checking") {
+      safeSetText("cardStatusText", card.validationMessage || "Проверка...");
+      return;
+    }
+
+    renderCard(card);
+    stopCardPolling(onDone);
+    setStatus("active", card.validated ? "Карта LIVE ✅" : "Карта готова");
   }, 1500);
 }
 
-function refreshAddressOnly() {
+async function refreshAddressOnly() {
   const country = $("countrySelect")?.value || currentCountry;
   $("btnRefreshAddress").disabled = true;
   setStatus("", addressPinned ? "Новое имя..." : "Новый адрес...");
 
-  chrome.runtime.sendMessage({ action: "refreshAddress", country }, res => {
-    $("btnRefreshAddress").disabled = false;
-    if (!res?.address) {
-      setStatus("error", "Ошибка адреса");
-      return;
-    }
-    chrome.runtime.sendMessage({ action: "getUserEmail" }, emailRes => {
-      lastAddress = emailRes?.email ? { ...res.address, email: emailRes.email, pinned: res.pinned } : { ...res.address, pinned: res.pinned };
-      renderAddress(lastAddress);
-      saveCurrentToProfile();
-      setStatus("active", addressPinned ? "Имя обновлено ✅" : "Адрес обновлён ✅");
-    });
-  });
+  const res = await sendBg("refreshAddress", { country });
+  $("btnRefreshAddress").disabled = false;
+
+  if (res?.error === "timeout") {
+    setStatus("error", "Таймаут адреса — попробуйте снова");
+    return;
+  }
+  if (res?.error) {
+    setStatus("error", "Нет связи с расширением");
+    return;
+  }
+  if (!res?.address) {
+    setStatus("error", "Ошибка адреса");
+    return;
+  }
+
+  const emailRes = await sendBg("getUserEmail", {}, 5000);
+  lastAddress = emailRes?.email
+    ? { ...res.address, email: emailRes.email, pinned: res.pinned }
+    : { ...res.address, pinned: res.pinned };
+  renderAddress(lastAddress);
+  saveCurrentToProfile();
+  setStatus("active", addressPinned ? "Имя обновлено ✅" : "Адрес обновлён ✅");
 }
 
-function refreshCardOnly(silent) {
+async function refreshCardOnly(silent) {
   $("btnRefreshCard").disabled = true;
   setButtonsDisabled(true);
   if (!silent) setStatus("", "Новая карта...");
 
-  chrome.runtime.sendMessage({ action: "startCardCheck" }, res => {
-    if (!res?.started) {
-      $("btnRefreshCard").disabled = false;
-      setButtonsDisabled(false);
-      if (!silent) setStatus("error", "Ошибка карты");
-      return;
-    }
-    chrome.runtime.sendMessage({ action: "getCardCache" }, cardRes => {
-      if (cardRes?.card) renderCard(cardRes.card);
-    });
-    startCardPolling(() => {
-      $("btnRefreshCard").disabled = false;
-      setButtonsDisabled(false);
-    });
+  const res = await sendBg("startCardCheck");
+  if (!res?.started) {
+    $("btnRefreshCard").disabled = false;
+    setButtonsDisabled(false);
+    if (!silent) setStatus("error", res?.error === "timeout" ? "Таймаут карты" : "Ошибка карты");
+    return;
+  }
+
+  const cardRes = await sendBg("getCardCache", {}, 5000);
+  if (cardRes?.card) renderCard(cardRes.card);
+  startCardPolling(() => {
+    $("btnRefreshCard").disabled = false;
+    setButtonsDisabled(false);
   });
 }
 
-function refreshAll() {
+async function refreshAll() {
   setRefreshDisabled(true);
   setButtonsDisabled(true);
   setStatus("", "Обновление...");
   const country = $("countrySelect")?.value || currentCountry;
 
-  chrome.runtime.sendMessage({ action: "refreshAddress", country }, res => {
-    if (res?.address) {
-      chrome.runtime.sendMessage({ action: "getUserEmail" }, emailRes => {
-        lastAddress = emailRes?.email ? { ...res.address, email: emailRes.email, pinned: res.pinned } : { ...res.address, pinned: res.pinned };
-        renderAddress(lastAddress);
-      });
-    }
-    chrome.runtime.sendMessage({ action: "startCardCheck" }, res2 => {
-      if (!res2?.started) {
-        setRefreshDisabled(false);
-        setButtonsDisabled(false);
-        setStatus("active", "Адрес обновлён");
-        return;
-      }
-      chrome.runtime.sendMessage({ action: "getCardCache" }, cardRes => {
-        if (cardRes?.card) renderCard(cardRes.card);
-      });
-      startCardPolling(() => {
-        setRefreshDisabled(false);
-        setButtonsDisabled(false);
-        setStatus("active", "Всё обновлено ✅");
-      });
-    });
+  const res = await sendBg("refreshAddress", { country });
+  if (res?.address) {
+    const emailRes = await sendBg("getUserEmail", {}, 5000);
+    lastAddress = emailRes?.email
+      ? { ...res.address, email: emailRes.email, pinned: res.pinned }
+      : { ...res.address, pinned: res.pinned };
+    renderAddress(lastAddress);
+  }
+
+  const res2 = await sendBg("startCardCheck");
+  if (!res2?.started) {
+    setRefreshDisabled(false);
+    setButtonsDisabled(false);
+    setStatus("active", res?.address ? "Адрес обновлён" : "Ошибка обновления");
+    return;
+  }
+
+  const cardRes = await sendBg("getCardCache", {}, 5000);
+  if (cardRes?.card) renderCard(cardRes.card);
+  startCardPolling(() => {
+    setRefreshDisabled(false);
+    setButtonsDisabled(false);
+    setStatus("active", "Всё обновлено ✅");
   });
 }
 
@@ -535,84 +632,63 @@ function fillPage(mode) {
   });
 }
 
-function loadSettings() {
-  chrome.storage.local.get(["onboardingDone"], data => {
-    if (data.onboardingDone) onboardingDismissed = true;
-    else if (onboarding && !onboardingDismissed) onboarding.hidden = false;
-  });
-
-  chrome.runtime.sendMessage({ action: "getSettings" }, res => {
-    if (chrome.runtime.lastError || !res) return;
-    if ($("soundMuteToggle")) $("soundMuteToggle").checked = !res.soundMuted;
-    if ($("compactModeToggle")) $("compactModeToggle").checked = !!res.compactMode;
-    if ($("stripeFabToggle")) $("stripeFabToggle").checked = res.stripeFabEnabled !== false;
-    showProfileSummary = res.showProfileSummary !== false;
-    if ($("showSummaryToggle")) $("showSummaryToggle").checked = showProfileSummary;
-    document.body.classList.toggle("compact-mode", !!res.compactMode);
-    if (res.onboardingDone) {
-      onboardingDismissed = true;
-      if (onboarding) onboarding.hidden = true;
-    } else if (onboarding && !onboardingDismissed) {
-      onboarding.hidden = false;
-    }
-    updateProfileSummary();
-  });
-
-  chrome.runtime.sendMessage({ action: "getShortcut" }, res => {
-    if (chrome.runtime.lastError) return;
-    if (res?.shortcut && shortcutKbd) shortcutKbd.textContent = res.shortcut;
-  });
-}
-
-function initPopup() {
-  chrome.runtime.sendMessage({ action: "getVersion" }, res => {
-    if (res?.version) safeSetText("versionTag", `v${res.version}`);
-  });
-
-  loadProfiles();
-  loadBinPresets();
-  loadSettings();
-  loadPinnedStatus();
+async function initPopup() {
   setupCopyOnClick();
+  setStatus("", "Загрузка...");
 
-  chrome.runtime.sendMessage({ action: "getAllData" }, res => {
-    if (!res) {
-      setStatus("error", "Ошибка загрузки");
-      return;
+  const boot = await sendBg("getPopupBootstrap", {}, 20000);
+  if (boot?.error) {
+    setStatus("error", boot.error === "timeout" ? "Таймаут загрузки" : "Ошибка расширения");
+    loadProfiles();
+    loadBinPresets();
+    return;
+  }
+
+  safeSetText("versionTag", `v${boot.version || "2.1.1"}`);
+  profiles = boot.profiles || [];
+  activeProfileId = boot.activeId || profiles[0]?.id || "default";
+  currentCountry = boot.country || "US";
+  lastAddress = boot.address || null;
+  lastCard = boot.card || null;
+
+  renderProfiles(activeProfileId);
+  renderCountriesList(boot.countries, currentCountry);
+  renderBinPresetsList(boot.presets, boot.bin);
+  applySettings(boot.settings);
+  updateProfileSummary();
+
+  const active = profiles.find(p => p.id === activeProfileId);
+  if ($("emailInput")) $("emailInput").value = boot.email || active?.email || "";
+  if ($("binInput") && boot.bin) $("binInput").value = boot.bin;
+  if (active?.bin) highlightBinPreset(active.bin);
+
+  if (lastAddress) renderAddress(lastAddress);
+  if (lastCard) renderCard(lastCard);
+  updatePinUI(boot.pinned);
+  if (shortcutKbd && boot.shortcut) shortcutKbd.textContent = boot.shortcut;
+  if ($("devModeToggle")) $("devModeToggle").checked = !!boot.devMode;
+
+  if (!lastAddress) {
+    setStatus("", "Получение адреса...");
+    const refreshed = await sendBg("refreshAddress", { country: currentCountry });
+    if (refreshed?.address) {
+      lastAddress = refreshed.address;
+      if (boot.email) lastAddress = { ...lastAddress, email: boot.email };
+      renderAddress(lastAddress);
     }
-    currentCountry = res.country || "US";
-    lastAddress = res.address || null;
-    lastCard = res.card || null;
-    loadCountries(currentCountry);
-    renderAddress(res.address);
-    renderCard(res.card);
-    updatePinUI(res.pinned);
+  }
 
-    chrome.runtime.sendMessage({ action: "getUserEmail" }, emailRes => {
-      if ($("emailInput")) $("emailInput").value = emailRes?.email || "";
-      if (emailRes?.email && lastAddress) {
-        lastAddress = { ...lastAddress, email: emailRes.email };
-        safeSetText("addrEmail", emailRes.email);
-      }
-      updateProfileSummary();
-    });
-
-    if (res.card?.validationStatus === "checking") {
-      startCardPolling();
-      setStatus("", "Проверка карты...");
-    } else if (res.address) {
-      setStatus("active", "Данные готовы");
-    } else {
-      setStatus("", "Загрузите данные");
-    }
-  });
-
-  chrome.runtime.sendMessage({ action: "getDevMode" }, res => {
-    if ($("devModeToggle")) $("devModeToggle").checked = !!res?.devMode;
-  });
+  if (lastCard?.validationStatus === "checking") {
+    startCardPolling();
+    setStatus("", "Проверка карты...");
+  } else if (lastAddress) {
+    setStatus("active", "Данные готовы");
+  } else {
+    setStatus("", "Нажмите «Новый» для адреса");
+  }
 }
 
-try { initPopup(); } catch (_) {}
+initPopup().catch(() => setStatus("error", "Ошибка инициализации"));
 
 $("btnFillAll")?.addEventListener("click", () => fillPage("all"));
 $("btnFillAddress")?.addEventListener("click", () => fillPage("address"));

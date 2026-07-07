@@ -21,7 +21,7 @@ const SHOW_PROFILE_SUMMARY_KEY = "showProfileSummary";
 const STRIPE_FAB_KEY = "stripeFabEnabled";
 const ONBOARDING_DONE_KEY = "onboardingDone";
 const MAX_PROFILES = 50;
-const EXT_VERSION = "2.1.1";
+const EXT_VERSION = "2.1.2";
 
 const DEFAULT_BIN = "5154620022";
 const BIN_STORAGE_KEY = "user_bin";
@@ -288,10 +288,15 @@ function getRandomAddress(countryCode) {
 
 async function fetchName(nat, countryCode) {
   try {
-    const res = await fetch(`https://randomuser.me/api/?nat=${nat}`);
+    const res = await fetchWithTimeout(
+      `https://randomuser.me/api/?nat=${nat}`,
+      {},
+      NAME_FETCH_TIMEOUT_MS
+    );
     if (!res.ok) throw new Error(`API error: ${res.status}`);
     const data = await res.json();
-    const user = data.results[0];
+    const user = data.results?.[0];
+    if (!user?.name) throw new Error("Invalid name response");
     return { firstName: user.name.first, lastName: user.name.last };
   } catch (err) {
     console.warn("[BG] Name fetch error, using fallback:", err);
@@ -508,6 +513,8 @@ async function generateFullCard() {
    ═══════════════════════════════════════════════════════ */
 
 const API_TIMEOUT_MS = 8000;
+const NAME_FETCH_TIMEOUT_MS = 6000;
+const CARD_CHECK_STALE_MS = 90000;
 
 const CHECK_APIS = [
   { name: "namso.live", url: "https://namso.live/api/v1/check.php", consecutive429: 0, disabledUntil: 0 },
@@ -683,14 +690,78 @@ async function startCardCheck() {
   currentCheckId++;
   const checkId = currentCheckId;
   const card = await generateCardInstant();
-  await chrome.storage.local.set({ [CARD_CACHE_KEY]: card });
+  await chrome.storage.local.set({ [CARD_CACHE_KEY]: card, [CARD_TS_KEY]: Date.now() });
   backgroundCheck(checkId);
   return { started: true };
 }
 
+async function recoverStaleCard(card) {
+  if (!card || card.validationStatus !== "checking") return card;
+  const data = await chrome.storage.local.get(CARD_TS_KEY);
+  const ts = data[CARD_TS_KEY] || 0;
+  if (Date.now() - ts < CARD_CHECK_STALE_MS) return card;
+  const recovered = {
+    ...card,
+    validated: false,
+    validationStatus: "unavailable",
+    validationMessage: "Проверка прервана — нажмите «Новая»"
+  };
+  await chrome.storage.local.set({ [CARD_CACHE_KEY]: recovered, [CARD_TS_KEY]: Date.now() });
+  return recovered;
+}
+
 async function getCachedCard() {
   const data = await chrome.storage.local.get(CARD_CACHE_KEY);
-  return data[CARD_CACHE_KEY] || null;
+  return recoverStaleCard(data[CARD_CACHE_KEY] || null);
+}
+
+async function getPopupBootstrap() {
+  const [{ profiles, activeId }, country, email, bin, settingsData] = await Promise.all([
+    getProfiles(),
+    getSelectedCountry(),
+    getUserEmail(),
+    getBin(),
+    chrome.storage.local.get([
+      DEV_MODE_KEY, SOUND_MUTED_KEY, COMPACT_MODE_KEY,
+      SHOW_PROFILE_SUMMARY_KEY, STRIPE_FAB_KEY, ONBOARDING_DONE_KEY
+    ])
+  ]);
+
+  const [addr, card, pinned] = await Promise.all([
+    getCachedAddress(country),
+    getCachedCard(),
+    getPinnedAddress()
+  ]);
+
+  const shortcut = await new Promise(resolve => {
+    chrome.commands.getAll(commands => {
+      const cmd = commands.find(c => c.name === "fill-page");
+      resolve(cmd?.shortcut || "Ctrl+Shift+Z");
+    });
+  });
+
+  return {
+    version: EXT_VERSION,
+    profiles,
+    activeId,
+    country,
+    address: await mergeAddressEmail(addr),
+    card,
+    pinned: !!(pinned && pinned.pinnedCountry === country),
+    email,
+    bin,
+    countries: getCountriesList(),
+    presets: BIN_PRESETS,
+    shortcut,
+    devMode: !!settingsData[DEV_MODE_KEY],
+    settings: {
+      soundMuted: !!settingsData[SOUND_MUTED_KEY],
+      compactMode: !!settingsData[COMPACT_MODE_KEY],
+      showProfileSummary: settingsData[SHOW_PROFILE_SUMMARY_KEY] !== false,
+      stripeFabEnabled: settingsData[STRIPE_FAB_KEY] !== false,
+      onboardingDone: !!settingsData[ONBOARDING_DONE_KEY]
+    }
+  };
 }
 
 function getCountriesList() {
@@ -739,18 +810,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action === "refreshAddress") {
     const country = msg.country || null;
     (async () => {
-      const code = country || await getSelectedCountry();
-      const addr = await fetchAddress(code);
-      if (addr) {
-        const merged = await mergeAddressEmail(addr);
-        await chrome.storage.local.set({
-          [addrCacheKey(code)]: merged,
-          [addrTsKey(code)]: Date.now()
-        });
-        sendResponse({ address: merged, pinned: !!merged.pinned });
-        return;
+      try {
+        const code = country || await getSelectedCountry();
+        const addr = await fetchAddress(code);
+        if (addr) {
+          const merged = await mergeAddressEmail(addr);
+          await chrome.storage.local.set({
+            [addrCacheKey(code)]: merged,
+            [addrTsKey(code)]: Date.now()
+          });
+          sendResponse({ address: merged, pinned: !!merged.pinned });
+          return;
+        }
+        sendResponse({ address: null });
+      } catch (err) {
+        console.error("[BG] refreshAddress error:", err);
+        sendResponse({ address: null, error: String(err?.message || err) });
       }
-      sendResponse({ address: null });
     })();
     return true;
   }
@@ -903,22 +979,38 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  if (msg.action === "getAllData") {
-    getSelectedCountry().then(async country => {
-      const [addr, card, pinned] = await Promise.all([
-        getCachedAddress(country), getCachedCard(), getPinnedAddress()
-      ]);
-      const address = await mergeAddressEmail(addr);
-      const d = await chrome.storage.local.get([DEV_MODE_KEY, SOUND_MUTED_KEY]);
-      sendResponse({
-        address,
-        card,
-        country,
-        devMode: !!d[DEV_MODE_KEY],
-        soundMuted: !!d[SOUND_MUTED_KEY],
-        pinned: !!(pinned && pinned.pinnedCountry === country)
+  if (msg.action === "getPopupBootstrap") {
+    getPopupBootstrap()
+      .then(data => sendResponse(data))
+      .catch(err => {
+        console.error("[BG] getPopupBootstrap error:", err);
+        sendResponse({ error: String(err?.message || err) });
       });
-    });
+    return true;
+  }
+
+  if (msg.action === "getAllData") {
+    (async () => {
+      try {
+        const country = await getSelectedCountry();
+        const [addr, card, pinned] = await Promise.all([
+          getCachedAddress(country), getCachedCard(), getPinnedAddress()
+        ]);
+        const address = await mergeAddressEmail(addr);
+        const d = await chrome.storage.local.get([DEV_MODE_KEY, SOUND_MUTED_KEY]);
+        sendResponse({
+          address,
+          card,
+          country,
+          devMode: !!d[DEV_MODE_KEY],
+          soundMuted: !!d[SOUND_MUTED_KEY],
+          pinned: !!(pinned && pinned.pinnedCountry === country)
+        });
+      } catch (err) {
+        console.error("[BG] getAllData error:", err);
+        sendResponse({ error: String(err?.message || err) });
+      }
+    })();
     return true;
   }
 });
