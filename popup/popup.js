@@ -16,6 +16,16 @@ let profiles = [];
 let activeProfileId = "default";
 let addressPinned = false;
 let showProfileSummary = true;
+let onboardingDismissed = false;
+
+function dismissOnboarding() {
+  onboardingDismissed = true;
+  if (onboarding) onboarding.hidden = true;
+  chrome.storage.local.set({ onboardingDone: true });
+  chrome.runtime.sendMessage({ action: "setSettings", onboardingDone: true }, () => {
+    void chrome.runtime.lastError;
+  });
+}
 
 const STATE_LABELS = {
   US: "Штат", GB: "Графство", DE: "Земля", FR: "Регион",
@@ -526,19 +536,30 @@ function fillPage(mode) {
 }
 
 function loadSettings() {
+  chrome.storage.local.get(["onboardingDone"], data => {
+    if (data.onboardingDone) onboardingDismissed = true;
+    else if (onboarding && !onboardingDismissed) onboarding.hidden = false;
+  });
+
   chrome.runtime.sendMessage({ action: "getSettings" }, res => {
-    if (!res) return;
+    if (chrome.runtime.lastError || !res) return;
     if ($("soundMuteToggle")) $("soundMuteToggle").checked = !res.soundMuted;
     if ($("compactModeToggle")) $("compactModeToggle").checked = !!res.compactMode;
     if ($("stripeFabToggle")) $("stripeFabToggle").checked = res.stripeFabEnabled !== false;
     showProfileSummary = res.showProfileSummary !== false;
     if ($("showSummaryToggle")) $("showSummaryToggle").checked = showProfileSummary;
     document.body.classList.toggle("compact-mode", !!res.compactMode);
-    if (!res.onboardingDone && onboarding) onboarding.hidden = false;
+    if (res.onboardingDone) {
+      onboardingDismissed = true;
+      if (onboarding) onboarding.hidden = true;
+    } else if (onboarding && !onboardingDismissed) {
+      onboarding.hidden = false;
+    }
     updateProfileSummary();
   });
 
   chrome.runtime.sendMessage({ action: "getShortcut" }, res => {
+    if (chrome.runtime.lastError) return;
     if (res?.shortcut && shortcutKbd) shortcutKbd.textContent = res.shortcut;
   });
 }
@@ -819,10 +840,7 @@ $("showSummaryToggle")?.addEventListener("change", () => {
   chrome.runtime.sendMessage({ action: "setSettings", showProfileSummary });
 });
 
-$("btnDismissOnboarding")?.addEventListener("click", () => {
-  if (onboarding) onboarding.hidden = true;
-  chrome.runtime.sendMessage({ action: "setSettings", onboardingDone: true });
-});
+$("btnDismissOnboarding")?.addEventListener("click", dismissOnboarding);
 
 $("btnOpenShortcuts")?.addEventListener("click", () => {
   chrome.tabs.create({ url: "chrome://extensions/shortcuts" });

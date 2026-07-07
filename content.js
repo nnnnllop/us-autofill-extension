@@ -392,7 +392,7 @@ async function fillInput(el, value, options = {}) {
   if (!el || !value) return false;
   if (fieldAlreadyFilled(el)) return true;
 
-  el.scrollIntoView({ block: "center", behavior: "instant" });
+  el.scrollIntoView({ block: "center", behavior: "auto" });
   el.focus();
   const strVal = String(value);
 
@@ -888,14 +888,13 @@ window.addEventListener("message", async (event) => {
 });
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (msg.action === "fillNow") {
-    executeFillWithRetries(msg.mode || "all").then(sendResponse);
-    return true;
-  }
-  if (msg.action === "fillWithAddress") {
-    executeFillWithRetries(msg.mode || "all").then(sendResponse);
-    return true;
-  }
+  if (msg.action !== "fillNow" && msg.action !== "fillWithAddress") return;
+  if (!IS_TOP_FRAME) return;
+
+  executeFillWithRetries(msg.mode || "all")
+    .then(sendResponse)
+    .catch(() => sendResponse({ filled: 0, success: false, message: "Ошибка заполнения" }));
+  return true;
 });
 
 /* ───────────── Stripe floating button ───────────── */
