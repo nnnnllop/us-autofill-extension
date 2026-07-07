@@ -376,23 +376,73 @@ function loadProfiles() {
   });
 }
 
-function saveCurrentToProfile() {
+function getProfilePayload(profile) {
+  return {
+    ...profile,
+    country: $("countrySelect")?.value || currentCountry,
+    bin: $("binInput")?.value?.replace(/\D/g, "") || profile.bin,
+    email: $("emailInput")?.value?.trim() || ""
+  };
+}
+
+async function saveCurrentToProfile() {
   const active = profiles.find(p => p.id === activeProfileId);
   if (!active) return;
-  chrome.runtime.sendMessage({
-    action: "saveProfile",
-    profile: {
-      ...active,
-      country: $("countrySelect")?.value || currentCountry,
-      bin: $("binInput")?.value?.replace(/\D/g, "") || active.bin,
-      email: $("emailInput")?.value?.trim() || ""
+  const res = await sendBg("saveProfile", { profile: getProfilePayload(active) }, 8000);
+  if (res?.profiles) {
+    profiles = res.profiles;
+    updateProfileSummary();
+  }
+}
+
+async function applyProfileToUI(profile, options = {}) {
+  if (!profile) return;
+  activeProfileId = profile.id;
+  currentCountry = profile.country || currentCountry;
+  if ($("countrySelect")) $("countrySelect").value = currentCountry;
+  if ($("binInput")) $("binInput").value = profile.bin || "";
+  if ($("emailInput")) $("emailInput").value = profile.email || "";
+  highlightBinPreset(profile.bin);
+
+  const pinRes = await sendBg("getPinnedStatus", {}, 8000);
+  updatePinUI(pinRes?.pinned);
+
+  const addrRes = await sendBg("getAddress", { country: currentCountry }, 10000);
+  if (pinRes?.address) {
+    lastAddress = profile.email
+      ? { ...pinRes.address, email: profile.email, pinned: true }
+      : { ...pinRes.address, pinned: true };
+  } else if (addrRes?.address) {
+    lastAddress = profile.email
+      ? { ...addrRes.address, email: profile.email }
+      : addrRes.address;
+  }
+  if (lastAddress) renderAddress(lastAddress);
+
+  if (options.reloadCard) {
+    const cardRes = await sendBg("getCardCache", {}, 5000);
+    if (cardRes?.card) {
+      renderCard(cardRes.card);
+      if (cardRes.card.validationStatus === "checking") startCardPolling();
+    } else {
+      await refreshCardOnly(true);
     }
-  }, res => {
-    if (res?.profiles) {
-      profiles = res.profiles;
-      updateProfileSummary();
-    }
-  });
+  }
+
+  updateProfileSummary();
+}
+
+async function switchProfile(id) {
+  await saveCurrentToProfile();
+  setStatus("", "Смена профиля...");
+  const res = await sendBg("setActiveProfile", { id }, 10000);
+  if (!res?.profile) {
+    setStatus("error", res?.error === "timeout" ? "Таймаут профиля" : "Ошибка профиля");
+    return;
+  }
+  if (res.profiles) profiles = res.profiles;
+  await applyProfileToUI(res.profile, { reloadCard: true });
+  setStatus("active", `${res.profile.name} ✅`);
 }
 
 function highlightBinPreset(bin) {
@@ -699,41 +749,29 @@ $("btnRefreshAll")?.addEventListener("click", refreshAll);
 $("btnCopyAddress")?.addEventListener("click", copyAddress);
 $("btnCopyCard")?.addEventListener("click", copyCard);
 
-$("btnPinAddress")?.addEventListener("click", () => {
+$("btnPinAddress")?.addEventListener("click", async () => {
   const action = addressPinned ? "unpinAddress" : "pinAddress";
   const country = $("countrySelect")?.value || currentCountry;
-  chrome.runtime.sendMessage({ action, country }, res => {
-    if (action === "pinAddress" && res?.address) {
-      lastAddress = res.address;
-      renderAddress(lastAddress);
-      setStatus("active", "Адрес закреплён 📌");
-    } else {
-      updatePinUI(false);
-      if (lastAddress) lastAddress = { ...lastAddress, pinned: false };
-      setStatus("active", "Адрес откреплён");
-    }
-  });
+  setStatus("", addressPinned ? "Открепление..." : "Закрепление...");
+  const res = await sendBg(action, { country }, 10000);
+  if (res?.error) {
+    setStatus("error", "Ошибка закрепления");
+    return;
+  }
+  if (action === "pinAddress" && res?.address) {
+    const email = $("emailInput")?.value?.trim() || res.address.email;
+    lastAddress = email ? { ...res.address, email, pinned: true } : { ...res.address, pinned: true };
+    renderAddress(lastAddress);
+    setStatus("active", "Адрес закреплён 📌");
+  } else {
+    updatePinUI(false);
+    if (lastAddress) lastAddress = { ...lastAddress, pinned: false };
+    setStatus("active", "Адрес откреплён");
+  }
 });
 
 $("profileSelect")?.addEventListener("change", () => {
-  const id = $("profileSelect").value;
-  setStatus("", "Смена профиля...");
-  chrome.runtime.sendMessage({ action: "setActiveProfile", id }, res => {
-    if (!res?.profile) {
-      setStatus("error", "Ошибка профиля");
-      return;
-    }
-    activeProfileId = id;
-    const p = res.profile;
-    if ($("countrySelect")) $("countrySelect").value = p.country;
-    if ($("binInput")) $("binInput").value = p.bin || "";
-    if ($("emailInput")) $("emailInput").value = p.email || "";
-    highlightBinPreset(p.bin);
-    currentCountry = p.country;
-    loadAddressForCountry(p.country);
-    loadPinnedStatus();
-    setStatus("active", `${p.name} ✅`);
-  });
+  switchProfile($("profileSelect").value);
 });
 
 $("profileSelect")?.addEventListener("dblclick", () => {
@@ -750,27 +788,29 @@ $("profileSelect")?.addEventListener("dblclick", () => {
   });
 });
 
-$("btnAddProfile")?.addEventListener("click", () => {
+$("btnAddProfile")?.addEventListener("click", async () => {
+  await saveCurrentToProfile();
   const profile = {
     name: `Профиль ${profiles.length + 1}`,
     country: $("countrySelect")?.value || currentCountry,
     bin: $("binInput")?.value?.replace(/\D/g, "") || "5154620022",
-    email: $("emailInput")?.value?.trim() || ""
+    email: $("emailInput")?.value?.trim() || "",
+    setActive: true
   };
-  chrome.runtime.sendMessage({ action: "saveProfile", profile }, res => {
-    if (res?.error === "max_profiles") {
-      setStatus("error", "Максимум 50 профилей");
-      return;
-    }
-    if (res?.profile) {
-      profiles = res.profiles;
-      chrome.runtime.sendMessage({ action: "setActiveProfile", id: res.profile.id }, () => {
-        activeProfileId = res.profile.id;
-        renderProfiles(activeProfileId);
-        setStatus("active", `${res.profile.name} создан ✅`);
-      });
-    }
-  });
+  setStatus("", "Создание профиля...");
+  const res = await sendBg("saveProfile", { profile }, 10000);
+  if (res?.error === "max_profiles") {
+    setStatus("error", "Максимум 50 профилей");
+    return;
+  }
+  if (!res?.profile) {
+    setStatus("error", "Ошибка создания");
+    return;
+  }
+  profiles = res.profiles;
+  renderProfiles(res.profile.id);
+  await applyProfileToUI(res.profile, { reloadCard: true });
+  setStatus("active", `${res.profile.name} создан ✅`);
 });
 
 $("btnDeleteProfile")?.addEventListener("click", () => {
@@ -853,19 +893,20 @@ $("countrySelect")?.addEventListener("change", () => {
   });
 });
 
-$("btnSaveEmail")?.addEventListener("click", () => {
+$("btnSaveEmail")?.addEventListener("click", async () => {
   const email = $("emailInput")?.value?.trim() || "";
-  chrome.runtime.sendMessage({ action: "setUserEmail", email }, res => {
-    if (res?.email !== undefined) {
-      safeSetText("addrEmail", res.email || "—");
-      if (lastAddress) lastAddress = { ...lastAddress, email: res.email };
-      $("btnSaveEmail").style.color = "#22c55e";
-      setTimeout(() => { $("btnSaveEmail").style.color = ""; }, 1200);
-      saveCurrentToProfile();
-      updateProfileSummary();
-      setStatus("active", "Email сохранён ✅");
-    }
-  });
+  const res = await sendBg("setUserEmail", { email }, 8000);
+  if (res?.email !== undefined) {
+    safeSetText("addrEmail", res.email || "—");
+    if (lastAddress) lastAddress = { ...lastAddress, email: res.email };
+    $("btnSaveEmail").style.color = "#22c55e";
+    setTimeout(() => { $("btnSaveEmail").style.color = ""; }, 1200);
+    await saveCurrentToProfile();
+    updateProfileSummary();
+    setStatus("active", "Email сохранён ✅");
+  } else {
+    setStatus("error", "Не удалось сохранить email");
+  }
 });
 
 $("emailInput")?.addEventListener("keydown", e => {

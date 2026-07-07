@@ -21,7 +21,7 @@ const SHOW_PROFILE_SUMMARY_KEY = "showProfileSummary";
 const STRIPE_FAB_KEY = "stripeFabEnabled";
 const ONBOARDING_DONE_KEY = "onboardingDone";
 const MAX_PROFILES = 50;
-const EXT_VERSION = "2.1.2";
+const EXT_VERSION = "2.1.3";
 
 const DEFAULT_BIN = "5154620022";
 const BIN_STORAGE_KEY = "user_bin";
@@ -202,15 +202,20 @@ async function getActiveProfile() {
 
 async function applyProfile(profile) {
   if (!profile) return;
+  const prev = await getActiveProfile();
   const updates = { [SELECTED_COUNTRY_KEY]: profile.country || DEFAULT_COUNTRY };
-  if (profile.bin) updates[BIN_STORAGE_KEY] = profile.bin.replace(/\D/g, "");
+  const newBin = (profile.bin || DEFAULT_BIN).replace(/\D/g, "");
+  updates[BIN_STORAGE_KEY] = newBin;
   updates[USER_EMAIL_KEY] = (profile.email || "").trim();
   await chrome.storage.local.set(updates);
   await chrome.storage.local.set({ [ACTIVE_PROFILE_KEY]: profile.id });
+  if (prev?.id !== profile.id || prev?.bin !== newBin) {
+    await chrome.storage.local.remove([CARD_CACHE_KEY, CARD_TS_KEY]);
+  }
 }
 
 async function saveProfile(profileData) {
-  const { profiles } = await getProfiles();
+  const { profiles, activeId } = await getProfiles();
   const idx = profiles.findIndex(p => p.id === profileData.id);
   const entry = {
     id: profileData.id || profileId(),
@@ -222,8 +227,27 @@ async function saveProfile(profileData) {
   if (idx >= 0) profiles[idx] = entry;
   else if (profiles.length < MAX_PROFILES) profiles.push(entry);
   else return { error: "max_profiles" };
+
   await chrome.storage.local.set({ [PROFILES_KEY]: profiles });
-  return { profile: entry, profiles };
+
+  if (profileData.setActive) {
+    await applyProfile(entry);
+    return { profile: entry, profiles, activeId: entry.id };
+  }
+
+  if (entry.id === activeId) {
+    const prev = await getActiveProfile();
+    await chrome.storage.local.set({
+      [USER_EMAIL_KEY]: entry.email,
+      [SELECTED_COUNTRY_KEY]: entry.country,
+      [BIN_STORAGE_KEY]: entry.bin
+    });
+    if (prev?.bin !== entry.bin || prev?.country !== entry.country) {
+      await chrome.storage.local.remove([CARD_CACHE_KEY, CARD_TS_KEY]);
+    }
+  }
+
+  return { profile: entry, profiles, activeId };
 }
 
 async function deleteProfile(id) {
@@ -948,11 +972,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.action === "setActiveProfile") {
     (async () => {
-      const { profiles } = await getProfiles();
-      const profile = profiles.find(p => p.id === msg.id);
-      if (!profile) { sendResponse({ error: "not_found" }); return; }
-      await applyProfile(profile);
-      sendResponse({ profile });
+      try {
+        const { profiles } = await getProfiles();
+        const profile = profiles.find(p => p.id === msg.id);
+        if (!profile) { sendResponse({ error: "not_found" }); return; }
+        await applyProfile(profile);
+        sendResponse({ profile, profiles, activeId: profile.id });
+      } catch (err) {
+        console.error("[BG] setActiveProfile error:", err);
+        sendResponse({ error: String(err?.message || err) });
+      }
     })();
     return true;
   }

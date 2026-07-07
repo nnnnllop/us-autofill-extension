@@ -64,7 +64,7 @@ const FIELD_MAP = {
       'input[name="email"]', 'input[id="email"]', 'input[type="email"]',
       'input[autocomplete="email"]', 'input[data-testid="email-input"]',
       'input[name="checkout[email]"]', 'input[id="email-input"]',
-      'input[placeholder*="email" i]'
+      'input[placeholder*="email" i]', 'input#email', 'input.Input[name="email"]'
     ],
     keywords: ["email", "e-mail", "почта"]
   },
@@ -100,11 +100,11 @@ const FIELD_MAP = {
     selectors: [
       'input[autocomplete="address-line1"]', 'input[autocomplete="street-address"]',
       'input[name*="address1" i]', 'input[name*="street" i]', 'input[name*="line1" i]',
-      'input[name="billingAddressLine1"]',
+      'input[name="billingAddressLine1"]', 'input#billingAddressLine1',
       'input[name="checkout[shipping_address][address1]"]',
       'input[name="checkout[billing_address][address1]"]'
     ],
-    keywords: ["address 1", "street", "улица", "billing address", "адрес"]
+    keywords: ["address 1", "street", "улица", "billing address", "адрес", "address line"]
   },
   address2: {
     selectors: [
@@ -117,7 +117,7 @@ const FIELD_MAP = {
   city: {
     selectors: [
       'input[autocomplete="address-level2"]', 'input[name*="city" i]',
-      'input[name="billingLocality"]',
+      'input[name="billingLocality"]', 'input#billingLocality',
       'input[name="checkout[shipping_address][city]"]',
       'input[name="checkout[billing_address][city]"]'
     ],
@@ -127,6 +127,7 @@ const FIELD_MAP = {
     selectors: [
       'select[autocomplete="address-level1"]', 'select[name*="state" i]',
       'input[name*="state" i]', 'select[name="billingAdministrativeArea"]',
+      'select#billingAdministrativeArea', 'input#billingAdministrativeArea',
       'select[name="checkout[shipping_address][province]"]',
       'select[name="checkout[billing_address][province]"]'
     ],
@@ -136,6 +137,7 @@ const FIELD_MAP = {
     selectors: [
       'input[autocomplete="postal-code"]', 'input[name*="zip" i]',
       'input[name*="postal" i]', 'input[name="billingPostalCode"]',
+      'input#billingPostalCode',
       'input[name="checkout[shipping_address][zip]"]',
       'input[name="checkout[billing_address][zip]"]'
     ],
@@ -144,7 +146,7 @@ const FIELD_MAP = {
   country: {
     selectors: [
       'select[autocomplete="country"]', 'select[name*="country" i]',
-      'select[name="billingCountry"]',
+      'select[name="billingCountry"]', 'select#billingCountry',
       'select[name="checkout[shipping_address][country]"]',
       'select[name="checkout[billing_address][country]"]'
     ],
@@ -497,26 +499,56 @@ function findClickableByText(patterns) {
 /* ───────────── Platform prep ───────────── */
 
 async function expandBillingAddress() {
-  const toggle = findClickableByText([
+  const patterns = [
     /add billing address/i, /billing address/i, /enter billing/i,
-    /добавить адрес/i, /адрес для счёта/i
-  ]);
+    /enter address manually/i, /add address/i,
+    /добавить адрес/i, /адрес для счёта/i, /ввести адрес/i
+  ];
+  const toggle = findClickableByText(patterns);
   if (toggle) {
     toggle.click();
-    await sleep(500);
+    await sleep(600);
+    return true;
+  }
+  const billingToggle = document.querySelector(
+    '[data-testid="billing-address-panel"] button, ' +
+    '[class*="BillingAddress"] button, ' +
+    'button[aria-expanded="false"][class*="Address"]'
+  );
+  if (billingToggle) {
+    billingToggle.click();
+    await sleep(600);
     return true;
   }
   return false;
 }
 
+async function waitForBillingFields(timeout = 5000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    if (findField("address1") || findField("city") || document.querySelector("#billingAddressLine1")) {
+      return true;
+    }
+    await sleep(200);
+  }
+  return false;
+}
+
 async function prepareStripeCheckout() {
-  if (!isStripeCheckoutPage() || stripePrepDone) return;
-  const enterDetails = findClickableByText([/enter payment details/i, /ввести данные/i]);
-  if (enterDetails) { enterDetails.click(); await sleep(600); }
-  const cardMethod = findClickableByText([/^card$/i, /^карта$/i]);
-  if (cardMethod) { cardMethod.click(); await sleep(400); }
+  if (!isStripeCheckoutPage()) return;
+
+  const enterDetails = findClickableByText([
+    /enter payment details/i, /ввести данные/i,
+    /pay without link/i, /оплатить без link/i
+  ]);
+  if (enterDetails) { enterDetails.click(); await sleep(700); }
+
+  const cardMethod = findClickableByText([/^card$/i, /^карта$/i, /credit or debit/i, /банковск/i]);
+  if (cardMethod) { cardMethod.click(); await sleep(500); }
+
   await expandBillingAddress();
-  stripePrepDone = true;
+  await waitForBillingFields(4000);
+  await sleep(300);
 }
 
 async function prepareShopifyCheckout() {
@@ -525,12 +557,16 @@ async function prepareShopifyCheckout() {
 }
 
 async function prepareCheckout(platform) {
-  if (platform === "stripe") await prepareStripeCheckout();
-  else if (platform === "shopify") await prepareShopifyCheckout();
-  else if (platform === "paddle" || platform === "lemon") {
+  if (platform === "stripe") {
+    await prepareStripeCheckout();
+    stripePrepDone = true;
+  } else if (platform === "shopify") {
+    await prepareShopifyCheckout();
+  } else if (platform === "paddle" || platform === "lemon") {
     const cardTab = findClickableByText([/^card$/i, /credit card/i, /^карта$/i]);
     if (cardTab) { cardTab.click(); await sleep(400); }
     await expandBillingAddress();
+    await waitForBillingFields(3000);
   }
 }
 
@@ -808,6 +844,7 @@ function getAllData() {
 async function executeFillWithRetries(mode) {
   if (fillInProgress) return buildResult(0, createReport(mode), detectPlatform(), mode);
   fillInProgress = true;
+  stripePrepDone = false;
 
   let best = null;
   let stagnant = 0;
@@ -823,10 +860,13 @@ async function executeFillWithRetries(mode) {
       devMode = !!data.devMode;
       soundMuted = !!data.soundMuted;
 
-      if (i > 0 && isStripeCheckoutPage()) {
-        await waitForStripeFrames(1500);
-        broadcastFill({ address: data.address, card: data.card, mode });
-        await sleep(350);
+      if (isStripeCheckoutPage()) {
+        stripePrepDone = false;
+        await waitForStripeFrames(i === 0 ? 3000 : 1500);
+        if (data.card?.number && (mode === "all" || mode === "card")) {
+          broadcastFill({ address: data.address, card: data.card, mode });
+          await sleep(400);
+        }
       }
 
       const result = await autoFill(data.address, data.card, mode);
@@ -839,8 +879,9 @@ async function executeFillWithRetries(mode) {
       lastCount = filledCount;
 
       const present = detectPresentFields(mode);
+      const maxStagnant = isStripeCheckoutPage() ? 4 : 2;
       if (present.length > 0 && filledCount >= present.length) break;
-      if (stagnant >= 2 && filledCount > 0) break;
+      if (stagnant >= maxStagnant && filledCount > 0) break;
     }
 
     if (best) {
