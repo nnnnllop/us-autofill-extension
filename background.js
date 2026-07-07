@@ -21,7 +21,7 @@ const SHOW_PROFILE_SUMMARY_KEY = "showProfileSummary";
 const STRIPE_FAB_KEY = "stripeFabEnabled";
 const ONBOARDING_DONE_KEY = "onboardingDone";
 const MAX_PROFILES = 50;
-const EXT_VERSION = "2.1.3";
+const EXT_VERSION = "2.1.4";
 
 const DEFAULT_BIN = "5154620022";
 const BIN_STORAGE_KEY = "user_bin";

@@ -337,7 +337,45 @@ function findByPlaceholder(keywords) {
   return null;
 }
 
+const STRIPE_BILLING_IDS = {
+  email: ["email"],
+  firstName: ["billingFirstName"],
+  lastName: ["billingLastName"],
+  address1: ["billingAddressLine1"],
+  address2: ["billingAddressLine2"],
+  city: ["billingLocality"],
+  zip: ["billingPostalCode"],
+  state: ["billingAdministrativeArea"],
+  country: ["billingCountry"]
+};
+
+const COUNTRY_DISPLAY_NAMES = {
+  US: "United States", GB: "United Kingdom", DE: "Germany", FR: "France",
+  CA: "Canada", AU: "Australia", NL: "Netherlands", IT: "Italy", ES: "Spain", PL: "Poland"
+};
+
+function findStripeBillingField(key) {
+  const ids = STRIPE_BILLING_IDS[key];
+  if (!ids) return null;
+  for (const id of ids) {
+    const candidates = [
+      document.getElementById(id),
+      document.querySelector(`input#${id}, select#${id}`),
+      document.querySelector(`[name="${id}"]`),
+      ...queryAllDeep(`#${id}, [name="${id}"]`)
+    ].filter(Boolean);
+    for (const el of candidates) {
+      if (isFillable(el)) return el;
+    }
+  }
+  return null;
+}
+
 function findField(key) {
+  if (isStripeCheckoutPage()) {
+    const stripeEl = findStripeBillingField(key);
+    if (stripeEl) return stripeEl;
+  }
   const cfg = FIELD_MAP[key];
   if (!cfg) return null;
   return findBySelectors(cfg.selectors) || findByLabel(cfg.keywords) ||
@@ -369,8 +407,11 @@ function setReportStatus(report, key, status) {
 
 /* ───────────── Fill helpers ───────────── */
 
-function fieldAlreadyFilled(el) {
-  return el?.getAttribute("data-us-autofilled") === "true" || !!el?.value?.trim();
+function fieldAlreadyFilled(el, options = {}) {
+  if (!el) return false;
+  if (options.force) return false;
+  if (el.getAttribute("data-us-autofilled") === "true") return true;
+  return !!el.value?.trim();
 }
 
 async function fillStripeStyle(el, value) {
@@ -392,7 +433,7 @@ async function fillViaPaste(el, value) {
 
 async function fillInput(el, value, options = {}) {
   if (!el || !value) return false;
-  if (fieldAlreadyFilled(el)) return true;
+  if (fieldAlreadyFilled(el, options)) return true;
 
   el.scrollIntoView({ block: "center", behavior: "auto" });
   el.focus();
@@ -400,10 +441,14 @@ async function fillInput(el, value, options = {}) {
 
   if (options.stripe) {
     await fillStripeStyle(el, strVal);
+    if (el.value !== strVal && el.value.replace(/\s/g, "") !== strVal.replace(/\s/g, "")) {
+      await fillViaPaste(el, strVal);
+    }
   } else {
     setNativeValue(el, strVal);
     dispatchEvents(el);
     if (el.value !== strVal) await fillViaPaste(el, strVal);
+    if (el.value !== strVal) await fillStripeStyle(el, strVal);
   }
 
   el.dispatchEvent(new Event("change", { bubbles: true }));
@@ -467,24 +512,136 @@ function selectState(el, stateName, stateAbbr) {
 async function clickCustomCountryDropdown(countryCode) {
   const searchRe = COUNTRY_SEARCH_TERMS[countryCode];
   if (!searchRe) return false;
+  const displayName = COUNTRY_DISPLAY_NAMES[countryCode] || countryCode;
   const patterns = [
+    '#billingCountry', '[id*="billingCountry"]', '[name="billingCountry"]',
     '[class*="country"] [role="combobox"]', '[class*="countrySelect"]',
-    '[class*="billing"] [class*="country"]'
+    '[class*="billing"] [class*="country"]', '[role="combobox"][aria-label*="country" i]'
   ];
+  const seen = new Set();
   for (const sel of patterns) {
-    const el = document.querySelector(sel);
-    if (!el || !isFillable(el)) continue;
-    el.click();
-    await sleep(400);
-    for (const item of document.querySelectorAll('[role="option"], li[class*="item"]')) {
-      if (searchRe.test(item.textContent.trim())) {
-        item.click();
-        return true;
+    for (const el of queryAllDeep(sel)) {
+      if (!el || seen.has(el)) continue;
+      seen.add(el);
+      if (!isFillable(el) && el.tagName !== "SELECT") continue;
+      el.click();
+      await sleep(500);
+      if (el.tagName === "INPUT") {
+        await fillInput(el, displayName, { force: true });
+        await sleep(400);
       }
+      for (const item of document.querySelectorAll(
+        '[role="option"], [role="menuitem"], [role="menuitemradio"], li[class*="item"], li[role="option"]'
+      )) {
+        const text = item.textContent.trim();
+        if (searchRe.test(text) || text === displayName) {
+          item.click();
+          await sleep(400);
+          return true;
+        }
+      }
+      document.body.click();
+      await sleep(200);
     }
-    document.body.click();
   }
   return false;
+}
+
+async function fillStripeCountry(countryCode) {
+  const countryEl = findStripeBillingField("country") || findField("country");
+  if (countryEl?.tagName === "SELECT") {
+    if (selectCountry(countryEl, countryCode)) return true;
+    const cfg = COUNTRY_PATTERNS[countryCode];
+    for (const opt of countryEl.options) {
+      const val = opt.value.trim();
+      const txt = opt.textContent.trim();
+      if (cfg?.values.includes(val) || cfg?.patterns.some(p => p.test(val) || p.test(txt))) {
+        setNativeValue(countryEl, opt.value);
+        dispatchEvents(countryEl);
+        countryEl.dispatchEvent(new Event("change", { bubbles: true }));
+        if (countryEl.value === opt.value) return true;
+      }
+    }
+  }
+  return clickCustomCountryDropdown(countryCode);
+}
+
+async function fillStripeBillingField(key, value, report, opts) {
+  if (!value && key !== "address2") {
+    setReportStatus(report, key, "skipped");
+    return false;
+  }
+  const el = findStripeBillingField(key) || findField(key);
+  if (!el) {
+    setReportStatus(report, key, "not_found");
+    return false;
+  }
+  if (fieldAlreadyFilled(el) && key !== "country") {
+    setReportStatus(report, key, "filled");
+    return true;
+  }
+  const ok = key === "email"
+    ? await fillInputIfEmpty(el, value, opts)
+    : await fillInput(el, value, { ...opts, force: key === "country" });
+  setReportStatus(report, key, ok ? "filled" : "not_found");
+  return ok;
+}
+
+async function fillStripeBillingAddress(address, countryCode, report) {
+  const billingOpts = { stripe: false };
+  let filled = 0;
+
+  await prepareStripeCheckout();
+
+  if (await fillStripeBillingField("email", address.email, report, billingOpts)) filled++;
+
+  const countryOk = await fillStripeCountry(countryCode);
+  setReportStatus(report, "country", countryOk ? "filled" : "not_found");
+  if (countryOk) {
+    filled++;
+    await sleep(900);
+  }
+
+  await expandBillingAddress();
+  await waitForBillingFields(6000);
+  await sleep(500);
+
+  const firstEl = findStripeBillingField("firstName") || findField("firstName");
+  const lastEl = findStripeBillingField("lastName") || findField("lastName");
+  const fullEl = findField("fullName");
+
+  if (fullEl && !firstEl) {
+    if (await fillStripeBillingField("fullName", address.fullName, report, billingOpts)) filled++;
+  } else {
+    if (await fillStripeBillingField("firstName", address.firstName, report, billingOpts)) filled++;
+    if (await fillStripeBillingField("lastName", address.lastName, report, billingOpts)) filled++;
+  }
+
+  if (await fillStripeBillingField("address1", address.address1, report, billingOpts)) filled++;
+  if (address.address2) {
+    if (await fillStripeBillingField("address2", address.address2, report, billingOpts)) filled++;
+  } else {
+    setReportStatus(report, "address2", "skipped");
+  }
+  if (await fillStripeBillingField("city", address.city, report, billingOpts)) filled++;
+
+  const stateEl = findStripeBillingField("state") || findField("state");
+  if (stateEl) {
+    let ok = false;
+    if (stateEl.tagName === "SELECT") {
+      ok = selectState(stateEl, address.state, address.stateAbbr);
+    } else {
+      ok = await fillInput(stateEl, address.stateAbbr || address.state, billingOpts);
+    }
+    setReportStatus(report, "state", ok ? "filled" : "not_found");
+    if (ok) filled++;
+  } else {
+    setReportStatus(report, "state", "not_found");
+  }
+
+  if (await fillStripeBillingField("zip", address.zip, report, billingOpts)) filled++;
+
+  return filled;
 }
 
 function findClickableByText(patterns) {
@@ -597,28 +754,52 @@ function detectFieldFromInput(input) {
   if (/cardexpiry|exp-date|cc-exp|expir|mm\/yy|срок|^expiry$/.test(meta)) return "cardExpiry";
   if (/cardcvc|cvc|cvv|cc-csc|security|verification|cid/.test(meta)) return "cardCVV";
   if (/cc-name|cardholder|billingname|^name$|full.?name/.test(meta)) return "fullName";
+  if (/^email$|e-mail/.test(meta)) return "email";
+  if (/address-line1|street|address1|billingaddressline1/.test(meta)) return "address1";
+  if (/address-level2|locality|city/.test(meta)) return "city";
+  if (/postal|zip|postcode/.test(meta)) return "zip";
+  if (/address-level1|administrative|state|province/.test(meta)) return "state";
   return null;
 }
 
 async function fillIframeFields(address, card, mode, report) {
+  const fillAddress = mode === "all" || mode === "address";
   const fillCard = mode === "all" || mode === "card";
-  if (!fillCard || !card?.number) return 0;
-
   let filled = 0;
-  const inputs = [...document.querySelectorAll('input:not([type="hidden"])')];
+
+  const inputs = [...document.querySelectorAll('input:not([type="hidden"]), select')];
+  const values = {
+    email: address?.email,
+    firstName: address?.firstName,
+    lastName: address?.lastName,
+    fullName: address?.fullName,
+    address1: address?.address1,
+    address2: address?.address2,
+    city: address?.city,
+    zip: address?.zip,
+    state: address?.stateAbbr || address?.state,
+    cardNumber: card?.number,
+    cardExpiry: card?.formattedExpiry,
+    cardCVV: card?.cvv
+  };
+
   for (const input of inputs) {
     if (fieldAlreadyFilled(input)) continue;
     const key = detectFieldFromInput(input);
     if (!key) continue;
-    const values = {
-      cardNumber: card.number,
-      cardExpiry: card.formattedExpiry,
-      cardCVV: card.cvv,
-      fullName: address?.fullName
-    };
+    if (!fillAddress && ADDRESS_KEYS.includes(key)) continue;
+    if (!fillCard && CARD_KEYS.includes(key)) continue;
     const value = values[key];
     if (!value) continue;
-    if (await fillInput(input, value, { stripe: true })) {
+
+    let ok = false;
+    if (key === "state" && input.tagName === "SELECT" && address) {
+      ok = selectState(input, address.state, address.stateAbbr);
+    } else {
+      ok = await fillInput(input, value, { stripe: CARD_KEYS.includes(key) });
+    }
+
+    if (ok) {
       filled++;
       if (report) setReportStatus(report, key, "filled");
       log(`iframe: ${key}`);
@@ -731,60 +912,64 @@ async function autoFill(address, card, mode = "all") {
     return buildResult(0, report, platform, mode);
   }
 
-  await prepareCheckout(platform);
-  if (platform === "stripe") await sleep(400);
-
   let filled = 0;
   const countryCode = address?.country || "US";
 
   if (fillAddress && address) {
-    if (await tryFillField("email", address.email, report, opts)) filled++;
-
-    const countryEl = findField("country");
-    if (countryEl) {
-      let ok = false;
-      if (countryEl.tagName === "SELECT") ok = selectCountry(countryEl, countryCode);
-      else ok = await clickCustomCountryDropdown(countryCode);
-      setReportStatus(report, "country", ok ? "filled" : "not_found");
-      if (ok) { filled++; await sleep(500); }
+    if (platform === "stripe") {
+      filled += await fillStripeBillingAddress(address, countryCode, report);
     } else {
-      setReportStatus(report, "country", "not_found");
+      await prepareCheckout(platform);
+
+      if (await tryFillField("email", address.email, report, opts)) filled++;
+
+      const countryEl = findField("country");
+      if (countryEl) {
+        let ok = false;
+        if (countryEl.tagName === "SELECT") ok = selectCountry(countryEl, countryCode);
+        else ok = await clickCustomCountryDropdown(countryCode);
+        setReportStatus(report, "country", ok ? "filled" : "not_found");
+        if (ok) { filled++; await sleep(500); }
+      } else {
+        setReportStatus(report, "country", "not_found");
+      }
+
+      const firstNameEl = findField("firstName");
+      const lastNameEl = findField("lastName");
+      const fullNameEl = findField("fullName");
+
+      if (fullNameEl && !firstNameEl) {
+        if (await tryFillField("fullName", address.fullName, report, opts)) filled++;
+      } else {
+        if (await tryFillField("firstName", address.firstName, report, opts)) filled++;
+        if (await tryFillField("lastName", address.lastName, report, opts)) filled++;
+        if (fullNameEl && await tryFillField("fullName", address.fullName, report, opts)) filled++;
+      }
+
+      if (await tryFillField("address1", address.address1, report, opts)) filled++;
+      if (address.address2 && await tryFillField("address2", address.address2, report, opts)) filled++;
+      else setReportStatus(report, "address2", "skipped");
+      if (await tryFillField("city", address.city, report, opts)) filled++;
+
+      const stateEl = findField("state");
+      if (stateEl) {
+        let ok = false;
+        if (stateEl.tagName === "SELECT") ok = selectState(stateEl, address.state, address.stateAbbr);
+        else ok = await fillInput(stateEl, address.stateAbbr || address.state, opts);
+        setReportStatus(report, "state", ok ? "filled" : "not_found");
+        if (ok) filled++;
+      } else {
+        setReportStatus(report, "state", "not_found");
+      }
+
+      if (await tryFillField("zip", address.zip, report, opts)) filled++;
     }
-
-    const firstNameEl = findField("firstName");
-    const lastNameEl = findField("lastName");
-    const fullNameEl = findField("fullName");
-
-    if (fullNameEl && !firstNameEl) {
-      if (await tryFillField("fullName", address.fullName, report, opts)) filled++;
-    } else {
-      if (await tryFillField("firstName", address.firstName, report, opts)) filled++;
-      if (await tryFillField("lastName", address.lastName, report, opts)) filled++;
-      if (fullNameEl && await tryFillField("fullName", address.fullName, report, opts)) filled++;
-    }
-
-    if (await tryFillField("address1", address.address1, report, opts)) filled++;
-    if (address.address2 && await tryFillField("address2", address.address2, report, opts)) filled++;
-    else setReportStatus(report, "address2", "skipped");
-    if (await tryFillField("city", address.city, report, opts)) filled++;
-
-    const stateEl = findField("state");
-    if (stateEl) {
-      let ok = false;
-      if (stateEl.tagName === "SELECT") ok = selectState(stateEl, address.state, address.stateAbbr);
-      else ok = await fillInput(stateEl, address.stateAbbr || address.state, opts);
-      setReportStatus(report, "state", ok ? "filled" : "not_found");
-      if (ok) filled++;
-    } else {
-      setReportStatus(report, "state", "not_found");
-    }
-
-    if (await tryFillField("zip", address.zip, report, opts)) filled++;
   } else if (fillAddress) {
     ADDRESS_KEYS.forEach(k => setReportStatus(report, k, "skipped"));
   }
 
   if (fillCard && card?.number) {
+    if (platform === "stripe" && !fillAddress) await prepareStripeCheckout();
     if (mode === "card" && address?.fullName) {
       await tryFillField("fullName", address.fullName, report, opts);
     }
@@ -863,9 +1048,9 @@ async function executeFillWithRetries(mode) {
       if (isStripeCheckoutPage()) {
         stripePrepDone = false;
         await waitForStripeFrames(i === 0 ? 3000 : 1500);
-        if (data.card?.number && (mode === "all" || mode === "card")) {
+        if (data.address || data.card) {
           broadcastFill({ address: data.address, card: data.card, mode });
-          await sleep(400);
+          await sleep(500);
         }
       }
 
@@ -878,10 +1063,11 @@ async function executeFillWithRetries(mode) {
       else stagnant = 0;
       lastCount = filledCount;
 
-      const present = detectPresentFields(mode);
-      const maxStagnant = isStripeCheckoutPage() ? 4 : 2;
-      if (present.length > 0 && filledCount >= present.length) break;
-      if (stagnant >= maxStagnant && filledCount > 0) break;
+      if (!isStripeCheckoutPage()) {
+        const present = detectPresentFields(mode);
+        if (present.length > 0 && filledCount >= present.length) break;
+        if (stagnant >= 2 && filledCount > 0) break;
+      }
     }
 
     if (best) {
