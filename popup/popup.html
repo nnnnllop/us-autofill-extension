@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="app" id="appRoot">
+    <div class="onboarding" id="onboarding" hidden>
+      <div class="onboarding-card">
+        <h2>Добро пожаловать в AutoFill</h2>
+        <ul class="onboarding-list">
+          <li>Сохраните <strong>email</strong> — он не перезапишется на сайте</li>
+          <li>Создайте <strong>профили</strong> под разные сайты (до 50)</li>
+          <li>На <strong>Stripe</strong> появится кнопка Fill в углу</li>
+          <li>Горячая клавиша — нажмите ниже «Настроить»</li>
+          <li>Двойной клик по профилю — <strong>переименовать</strong></li>
+        </ul>
+        <button id="btnDismissOnboarding" class="btn-primary">Понятно</button>
+      </div>
+    </div>
+
+    <header class="header">
+      <div class="header-row">
+        <div class="brand">
+          <div class="brand-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none">
+              <path d="M4 7h16v10H4z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+              <path d="M4 10h16" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M7 15h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <div class="brand-text">
+            <h1>AutoFill</h1>
+            <span class="brand-tag" id="versionTag">v2.1</span>
+          </div>
+        </div>
+        <div class="status-pill" id="status">
+          <span class="dot" id="statusDot"></span>
+          <span id="statusText">Загрузка...</span>
+        </div>
+      </div>
+
+      <div class="profile-summary" id="profileSummary" hidden>
+        <span id="profileSummaryText">—</span>
+        <button id="btnHideSummary" class="btn-link" title="Скрыть">×</button>
+      </div>
+
+      <div class="header-controls">
+        <div class="control-row">
+          <label for="profileSelect" class="inline-label">Профиль</label>
+          <div class="select-wrap select-wrap--grow">
+            <select id="profileSelect" class="select-field select-field--compact" title="Двойной клик — переименовать"></select>
+            <span class="select-chevron" aria-hidden="true">▾</span>
+          </div>
+          <button id="btnAddProfile" class="btn-icon btn-icon--sm" title="Добавить профиль">+</button>
+          <button id="btnDeleteProfile" class="btn-icon btn-icon--sm btn-icon--danger" title="Удалить профиль">×</button>
+        </div>
+        <div class="control-row control-row--actions">
+          <button id="btnExportProfiles" class="btn-mini" title="Экспорт профилей">Экспорт</button>
+          <button id="btnImportProfiles" class="btn-mini" title="Импорт профилей">Импорт</button>
+          <input type="file" id="importFileInput" accept=".json,application/json" hidden>
+        </div>
+        <div class="control-row">
+          <label for="countrySelect" class="inline-label">Страна</label>
+          <div class="select-wrap select-wrap--grow">
+            <select id="countrySelect" class="select-field select-field--compact"></select>
+            <span class="select-chevron" aria-hidden="true">▾</span>
+          </div>
+        </div>
+        <div class="control-row">
+          <label for="emailInput" class="inline-label">Email</label>
+          <input type="email" id="emailInput" class="text-input" placeholder="ваш@email.com">
+          <button id="btnSaveEmail" class="btn-icon btn-icon--sm" title="Сохранить email">
+            <svg viewBox="0 0 24 24" fill="none"><path d="M5 5h14v16l-7-4-7 4V5z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main class="main">
+      <div class="columns">
+        <section class="panel">
+          <div class="panel-head panel-head--between">
+            <div class="panel-head-left">
+              <span class="panel-icon">📍</span>
+              <span class="panel-title">Адрес</span>
+              <span class="pin-badge" id="pinBadge" hidden title="Адрес закреплён">📌</span>
+            </div>
+            <div class="panel-actions">
+              <button id="btnPinAddress" class="btn-icon btn-icon--sm" title="Закрепить адрес">📌</button>
+              <button id="btnCopyAddress" class="btn-icon btn-icon--sm" title="Копировать адрес">
+                <svg viewBox="0 0 24 24" fill="none"><rect x="8" y="8" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.6"/><path d="M6 16H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" stroke="currentColor" stroke-width="1.6"/></svg>
+              </button>
+              <button id="btnRefreshAddress" class="btn-refresh-sm btn-refresh-sm--blue" title="Новый адрес и имя">
+                <svg viewBox="0 0 24 24" fill="none"><path d="M4 12a8 8 0 0 1 13.5-5.7M20 7v4h-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M20 12a8 8 0 0 1-13.5 5.7M4 17v-4h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <span>Новый</span>
+              </button>
+            </div>
+          </div>
+          <div class="data-grid data-grid--3" id="addressCard">
+            <div class="data-item data-item--wide data-item--copy" data-copy="addrEmail">
+              <span class="data-label">Email</span>
+              <span class="data-value mono" id="addrEmail">—</span>
+            </div>
+            <div class="data-item data-item--copy" data-copy="addrFirstName">
+              <span class="data-label">Имя</span>
+              <span class="data-value" id="addrFirstName">—</span>
+            </div>
+            <div class="data-item data-item--copy" data-copy="addrLastName">
+              <span class="data-label">Фамилия</span>
+              <span class="data-value" id="addrLastName">—</span>
+            </div>
+            <div class="data-item data-item--copy" data-copy="addrCity">
+              <span class="data-label">Город</span>
+              <span class="data-value" id="addrCity">—</span>
+            </div>
+            <div class="data-item data-item--wide data-item--copy" data-copy="addrAddress1">
+              <span class="data-label">Адрес</span>
+              <span class="data-value" id="addrAddress1">—</span>
+            </div>
+            <div class="data-item data-item--copy" data-copy="addrState">
+              <span class="data-label" id="addrStateLabel">Регион</span>
+              <span class="data-value" id="addrState">—</span>
+            </div>
+            <div class="data-item data-item--copy" data-copy="addrZip">
+              <span class="data-label" id="addrZipLabel">Индекс</span>
+              <span class="data-value mono" id="addrZip">—</span>
+            </div>
+            <div class="data-item data-item--copy" data-copy="addrCountry">
+              <span class="data-label">Страна</span>
+              <span class="data-value" id="addrCountry">—</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel panel--card">
+          <div class="panel-head panel-head--between">
+            <div class="panel-head-left">
+              <span class="panel-icon">💳</span>
+              <span class="panel-title">Карта</span>
+            </div>
+            <div class="panel-actions">
+              <button id="btnCopyCard" class="btn-icon btn-icon--sm" title="Копировать карту">
+                <svg viewBox="0 0 24 24" fill="none"><rect x="8" y="8" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.6"/><path d="M6 16H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" stroke="currentColor" stroke-width="1.6"/></svg>
+              </button>
+              <button id="btnRefreshCard" class="btn-refresh-sm btn-refresh-sm--purple" title="Новая карта">
+                <svg viewBox="0 0 24 24" fill="none"><path d="M4 12a8 8 0 0 1 13.5-5.7M20 7v4h-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M20 12a8 8 0 0 1-13.5 5.7M4 17v-4h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <span>Новая</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="card-layout">
+            <div class="card-preview card-preview--compact" id="cardPreviewBlock">
+              <div class="card-preview-glow" aria-hidden="true"></div>
+              <div class="card-preview-top">
+                <span class="card-chip" aria-hidden="true"></span>
+                <span class="card-type-badge" id="cardTypeBadge">MC</span>
+              </div>
+              <div class="card-preview-number mono" id="cardPreviewNumber">•••• •••• •••• ••••</div>
+              <div class="card-preview-bottom">
+                <div class="card-preview-meta">
+                  <span class="card-meta-label">Владелец</span>
+                  <span class="card-meta-value" id="cardPreviewName">—</span>
+                </div>
+                <div class="card-preview-meta">
+                  <span class="card-meta-label">Срок</span>
+                  <span class="card-meta-value mono" id="cardPreviewExpiry">—</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="card-side">
+              <div class="card-status" id="cardStatusBadge">
+                <span class="badge badge-loading">⏳</span>
+                <span id="cardStatusText">Проверка...</span>
+              </div>
+              <div class="bin-row">
+                <label for="binInput">BIN</label>
+                <input type="text" id="binInput" class="bin-input" placeholder="5154620022" maxlength="15">
+                <button id="btnSaveBin" class="btn-icon" title="Сохранить BIN">
+                  <svg viewBox="0 0 24 24" fill="none"><path d="M5 5h14v16l-7-4-7 4V5z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+                </button>
+              </div>
+              <div class="bin-presets" id="binPresets"></div>
+              <div class="data-grid data-grid--2" id="cardCard">
+                <div class="data-item data-item--copy" data-copy="cardNumber" data-copy-raw="cardNumberRaw">
+                  <span class="data-label">Номер</span>
+                  <span class="data-value mono" id="cardNumber">—</span>
+                </div>
+                <div class="data-item data-item--copy" data-copy="cardCVV" data-copy-raw="cardCVVRaw">
+                  <span class="data-label">CVV</span>
+                  <span class="data-value mono" id="cardCVV">—</span>
+                </div>
+                <div class="data-item data-item--copy" data-copy="cardType">
+                  <span class="data-label">Тип</span>
+                  <span class="data-value" id="cardType">—</span>
+                </div>
+                <div class="data-item data-item--copy" data-copy="cardExpiry">
+                  <span class="data-label">Срок</span>
+                  <span class="data-value mono" id="cardExpiry">—</span>
+                </div>
+                <div class="data-item data-item--wide data-item--copy" data-copy="cardBank">
+                  <span class="data-label">Банк</span>
+                  <span class="data-value" id="cardBank">—</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <section class="panel panel--actions">
+        <div class="actions-bar">
+          <div class="actions-fill">
+            <span class="actions-label">Заполнить</span>
+            <div class="fill-actions">
+              <button id="btnFillAll" class="fill-btn fill-btn--all">Всё</button>
+              <button id="btnFillAddress" class="fill-btn fill-btn--address">Адрес</button>
+              <button id="btnFillCard" class="fill-btn fill-btn--card">Карта</button>
+            </div>
+          </div>
+          <button id="btnRefreshAll" class="btn-refresh-all" title="Обновить адрес и карту">
+            <svg viewBox="0 0 24 24" fill="none"><path d="M4 12a8 8 0 0 1 13.5-5.7M20 7v4h-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M20 12a8 8 0 0 1-13.5 5.7M4 17v-4h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>Обновить всё</span>
+          </button>
+        </div>
+      </section>
+
+      <section class="panel panel--report" id="fillReportPanel" hidden>
+        <div class="panel-head">
+          <span class="panel-icon">📋</span>
+          <span class="panel-title">Отчёт заполнения</span>
+        </div>
+        <ul class="report-list" id="fillReportList"></ul>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="footer-row">
+        <label for="autoFillToggle" class="footer-label">Автозаполнение</label>
+        <input type="checkbox" id="autoFillToggle" class="toggle" checked>
+      </div>
+      <div class="footer-row">
+        <label for="autoFillMode" class="footer-label">Режим авто</label>
+        <div class="select-wrap select-wrap--sm">
+          <select id="autoFillMode" class="select-field select-field--sm">
+            <option value="all">Всё</option>
+            <option value="address">Имя + адрес</option>
+            <option value="card">Только карта</option>
+          </select>
+          <span class="select-chevron" aria-hidden="true">▾</span>
+        </div>
+      </div>
+      <div class="footer-row">
+        <label for="soundMuteToggle" class="footer-label">Звук</label>
+        <input type="checkbox" id="soundMuteToggle" class="toggle" checked>
+      </div>
+      <div class="footer-row">
+        <label for="compactModeToggle" class="footer-label">Компактный</label>
+        <input type="checkbox" id="compactModeToggle" class="toggle">
+      </div>
+      <div class="footer-row">
+        <label for="stripeFabToggle" class="footer-label">Кнопка Stripe</label>
+        <input type="checkbox" id="stripeFabToggle" class="toggle" checked>
+      </div>
+      <div class="footer-row">
+        <label for="showSummaryToggle" class="footer-label">Сводка</label>
+        <input type="checkbox" id="showSummaryToggle" class="toggle" checked>
+      </div>
+      <div class="footer-row">
+        <label for="devModeToggle" class="footer-label">Dev-логи</label>
+        <input type="checkbox" id="devModeToggle" class="toggle">
+      </div>
+      <div class="footer-row footer-hint">
+        <span class="footer-label footer-label--dim">Клавиша</span>
+        <kbd class="kbd" id="shortcutKbd">Ctrl+Shift+Z</kbd>
+        <button id="btnOpenShortcuts" class="btn-link">Настроить</button>
+      </div>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

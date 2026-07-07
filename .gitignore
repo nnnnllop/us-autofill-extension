@@ -1,0 +1,38 @@
+# ── ОС ──
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# ── Редакторы / IDE ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Python (генератор иконок) ──
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+
+# ── Логи и временные файлы ──
+*.log
+*.tmp
+*.bak
+
+# ── Личные данные пользователя — НИКОГДА не коммитить ──
+autofill-profiles*.json
+profiles-export*.json
+*-profiles.json
+exported-profiles.json
+
+# ── Архивы и сборки ──
+*.zip
+*.crx
+*.pem
+dist/
+build/

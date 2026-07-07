@@ -1,0 +1,61 @@
+/* Подсветка заполненных полей */
+input[data-us-autofilled],
+select[data-us-autofilled],
+textarea[data-us-autofilled] {
+  outline: 2px solid #22c55e !important;
+  outline-offset: -1px !important;
+  box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.15) !important;
+  transition: outline-color 0.4s ease, box-shadow 0.4s ease;
+}
+
+/* Подсветка незаполненных (найдены в отчёте, но не заполнены) */
+input[data-us-missed],
+select[data-us-missed],
+textarea[data-us-missed] {
+  outline: 2px dashed #f59e0b !important;
+  outline-offset: -1px !important;
+  box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.12) !important;
+}
+
+/* Stripe floating button */
+#us-autofill-fab {
+  all: initial;
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 2147483646;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 16px;
+  font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+  font-size: 13px;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(135deg, #635bff 0%, #4f46e5 100%);
+  border: none;
+  border-radius: 999px;
+  box-shadow: 0 4px 20px rgba(99, 91, 255, 0.45), 0 2px 8px rgba(0, 0, 0, 0.2);
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, opacity 0.2s ease;
+  user-select: none;
+}
+
+#us-autofill-fab:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 28px rgba(99, 91, 255, 0.55), 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+
+#us-autofill-fab:active {
+  transform: translateY(0);
+}
+
+#us-autofill-fab.us-af-fab--busy {
+  opacity: 0.75;
+  pointer-events: none;
+}
+
+.us-af-fab-icon {
+  font-size: 14px;
+  line-height: 1;
+}
