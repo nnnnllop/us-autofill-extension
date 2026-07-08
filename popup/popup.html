@@ -12,7 +12,7 @@
         <ul class="onboarding-list">
           <li>Сохраните <strong>email</strong> — он не перезапишется на сайте</li>
           <li>Создайте <strong>профили</strong> под разные сайты (до 50)</li>
-          <li>На <strong>Stripe</strong> появится кнопка Fill в углу</li>
+          <li>На <strong>Stripe</strong> появится кнопка «Заполнить» в углу</li>
           <li>Горячая клавиша — нажмите ниже «Настроить»</li>
           <li>Двойной клик по профилю — <strong>переименовать</strong></li>
         </ul>
@@ -32,7 +32,7 @@
           </div>
           <div class="brand-text">
             <h1>AutoFill</h1>
-            <span class="brand-tag" id="versionTag">v2.1.5</span>
+            <span class="brand-tag" id="versionTag">v2.3.0</span>
           </div>
         </div>
         <div class="status-pill" id="status">
@@ -65,6 +65,13 @@
           <label for="countrySelect" class="inline-label">Страна</label>
           <div class="select-wrap select-wrap--grow">
             <select id="countrySelect" class="select-field select-field--compact"></select>
+            <span class="select-chevron" aria-hidden="true">▾</span>
+          </div>
+        </div>
+        <div class="control-row">
+          <label for="currencySelect" class="inline-label">Валюта</label>
+          <div class="select-wrap select-wrap--grow">
+            <select id="currencySelect" class="select-field select-field--compact" title="Валюта на Stripe checkout"></select>
             <span class="select-chevron" aria-hidden="true">▾</span>
           </div>
         </div>
@@ -240,7 +247,10 @@
     <footer class="footer">
       <div class="footer-row">
         <label for="autoFillToggle" class="footer-label">Автозаполнение</label>
-        <input type="checkbox" id="autoFillToggle" class="toggle" checked>
+        <input type="checkbox" id="autoFillToggle" class="toggle">
+      </div>
+      <div class="footer-row footer-note" id="autoFillBetaNote" hidden>
+        <span>Функция ещё дорабатывается, возможны баги.</span>
       </div>
       <div class="footer-row">
         <label for="autoFillMode" class="footer-label">Режим авто</label>
@@ -262,7 +272,7 @@
         <input type="checkbox" id="compactModeToggle" class="toggle">
       </div>
       <div class="footer-row">
-        <label for="stripeFabToggle" class="footer-label">Кнопка Stripe</label>
+        <label for="stripeFabToggle" class="footer-label">Кнопка на сайте</label>
         <input type="checkbox" id="stripeFabToggle" class="toggle" checked>
       </div>
       <div class="footer-row">
@@ -272,6 +282,14 @@
       <div class="footer-row">
         <label for="devModeToggle" class="footer-label">Dev-логи</label>
         <input type="checkbox" id="devModeToggle" class="toggle">
+      </div>
+      <div class="footer-row footer-dev-actions">
+        <span class="footer-label footer-label--dim" id="devLogCount">Логи: 0</span>
+        <div class="dev-log-actions">
+          <button id="btnDownloadDevLogs" class="btn-mini" title="Скачать dev-логи">Скачать</button>
+          <button id="btnCopyDevLogs" class="btn-mini" title="Скопировать dev-логи">Копия</button>
+          <button id="btnClearDevLogs" class="btn-mini btn-mini--danger" title="Очистить dev-логи">Очистить</button>
+        </div>
       </div>
       <div class="footer-row footer-hint">
         <span class="footer-label footer-label--dim">Клавиша</span>

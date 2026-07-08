@@ -10,6 +10,7 @@ const shortcutKbd = $("shortcutKbd");
 
 let cardPollTimer = null;
 let currentCountry = "US";
+let currentCurrency = "USD";
 let lastAddress = null;
 let lastCard = null;
 let profiles = [];
@@ -64,6 +65,73 @@ function applySettings(settings) {
   }
 }
 
+function updateAutoFillBetaNote(enabled) {
+  const note = $("autoFillBetaNote");
+  if (note) note.hidden = !enabled;
+}
+
+function setDevLogCount(count) {
+  safeSetText("devLogCount", `Логи: ${count || 0}`);
+}
+
+function formatDevLogLine(log) {
+  const ts = log.ts || "";
+  const level = (log.level || "info").toUpperCase();
+  const source = log.source || "unknown";
+  const message = log.message || "";
+  const url = log.url ? ` | ${log.url}` : "";
+  const details = log.details ? ` | ${log.details}` : "";
+  return `[${ts}] [${level}] [${source}] ${message}${url}${details}`;
+}
+
+function serializeDevLogs(logs) {
+  if (!logs.length) return "Dev-логов нет.";
+  return logs.map(formatDevLogLine).join("\n");
+}
+
+async function fetchDevLogs() {
+  const res = await sendBg("getDevLogs", {}, 8000);
+  return Array.isArray(res?.logs) ? res.logs : [];
+}
+
+async function refreshDevLogCount() {
+  const logs = await fetchDevLogs();
+  setDevLogCount(logs.length);
+  return logs;
+}
+
+async function downloadDevLogs() {
+  const logs = await refreshDevLogCount();
+  const blob = new Blob([serializeDevLogs(logs)], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `autofill-dev-logs-${Date.now()}.txt`;
+  a.click();
+  URL.revokeObjectURL(url);
+  setStatus("active", "Dev-логи скачаны");
+}
+
+async function copyDevLogs() {
+  const logs = await refreshDevLogCount();
+  try {
+    await navigator.clipboard.writeText(serializeDevLogs(logs));
+    setStatus("active", "Dev-логи скопированы");
+  } catch {
+    setStatus("error", "Не удалось скопировать dev-логи");
+  }
+}
+
+async function clearDevLogs() {
+  const res = await sendBg("clearDevLogs", {}, 8000);
+  if (res?.ok) {
+    setDevLogCount(0);
+    setStatus("active", "Dev-логи очищены");
+  } else {
+    setStatus("error", "Не удалось очистить dev-логи");
+  }
+}
+
 function renderCountriesList(countries, selectedCode) {
   const sel = $("countrySelect");
   if (!sel || !countries) return;
@@ -72,6 +140,19 @@ function renderCountriesList(countries, selectedCode) {
     const opt = document.createElement("option");
     opt.value = c.code;
     opt.textContent = `${c.flag} ${c.name}`;
+    if (c.code === selectedCode) opt.selected = true;
+    sel.appendChild(opt);
+  });
+}
+
+function renderCurrenciesList(currencies, selectedCode) {
+  const sel = $("currencySelect");
+  if (!sel || !currencies) return;
+  sel.innerHTML = "";
+  currencies.forEach(c => {
+    const opt = document.createElement("option");
+    opt.value = c.code;
+    opt.textContent = `${c.flag} ${c.code} — ${c.name}`;
     if (c.code === selectedCode) opt.selected = true;
     sel.appendChild(opt);
   });
@@ -123,14 +204,22 @@ function safeSetText(id, text) {
   if (el) el.textContent = text;
 }
 
-function safeSetHTML(id, html) {
-  const el = $(id);
-  if (el) el.innerHTML = html;
-}
+function setCardStatus(badgeText, badgeClass, text, color) {
+  const el = $("cardStatusBadge");
+  if (!el) return;
+  el.textContent = "";
 
-function safeSetStyle(id, prop, val) {
-  const el = $(id);
-  if (el) el.style[prop] = val;
+  const badge = document.createElement("span");
+  badge.className = `badge ${badgeClass}`;
+  badge.textContent = badgeText;
+
+  const status = document.createElement("span");
+  status.id = "cardStatusText";
+  status.textContent = text;
+  if (color) status.style.color = color;
+
+  el.appendChild(badge);
+  el.appendChild(status);
 }
 
 function setButtonsDisabled(disabled) {
@@ -226,8 +315,7 @@ function renderCard(card) {
   lastCard = card;
 
   if (!card) {
-    safeSetHTML("cardStatusBadge", '<span class="badge badge-die">❌</span><span id="cardStatusText">Карта не получена</span>');
-    safeSetStyle("cardStatusText", "color", "#ef4444");
+    setCardStatus("❌", "badge-die", "Карта не получена", "#ef4444");
     updateCardPreview(null, lastAddress);
     updateProfileSummary();
     return;
@@ -244,20 +332,15 @@ function renderCard(card) {
 
   const vs = card.validationStatus;
   if (card.validated && vs === "live") {
-    safeSetHTML("cardStatusBadge", '<span class="badge badge-live">LIVE</span><span id="cardStatusText">' + (card.validationMessage || "Approved") + '</span>');
-    safeSetStyle("cardStatusText", "color", "#22c55e");
+    setCardStatus("LIVE", "badge-live", card.validationMessage || "Approved", "#22c55e");
   } else if (vs === "unavailable" || vs === "rate_limited" || vs === "timeout") {
-    safeSetHTML("cardStatusBadge", '<span class="badge badge-unavailable">API</span><span id="cardStatusText">' + (card.validationMessage || "API недоступен") + '</span>');
-    safeSetStyle("cardStatusText", "color", "#a855f7");
+    setCardStatus("API", "badge-unavailable", card.validationMessage || "API недоступен", "#a855f7");
   } else if (vs === "failed") {
-    safeSetHTML("cardStatusBadge", '<span class="badge badge-unknown">Лун ✓</span><span id="cardStatusText">Live не подтверждена</span>');
-    safeSetStyle("cardStatusText", "color", "#f59e0b");
+    setCardStatus("Лун ✓", "badge-unknown", "Live не подтверждена", "#f59e0b");
   } else if (vs === "checking") {
-    safeSetHTML("cardStatusBadge", '<span class="badge badge-loading">⏳</span><span id="cardStatusText">' + (card.validationMessage || "Проверяется...") + '</span>');
-    safeSetStyle("cardStatusText", "color", "#94a3b8");
+    setCardStatus("⏳", "badge-loading", card.validationMessage || "Проверяется...", "#94a3b8");
   } else {
-    safeSetHTML("cardStatusBadge", '<span class="badge badge-unknown">?</span><span id="cardStatusText">Неизвестно</span>');
-    safeSetStyle("cardStatusText", "color", "#f59e0b");
+    setCardStatus("?", "badge-unknown", "Неизвестно", "#f59e0b");
   }
 }
 
@@ -279,7 +362,14 @@ function renderFillReport(result) {
     li.className = "report-item";
     const statusClass = `report-status report-status--${item.status}`;
     const statusLabel = REPORT_STATUS_LABELS[item.status] || item.status;
-    li.innerHTML = `<span class="report-label">${item.label}</span><span class="${statusClass}">${statusLabel}</span>`;
+    const label = document.createElement("span");
+    label.className = "report-label";
+    label.textContent = item.label;
+    const status = document.createElement("span");
+    status.className = statusClass;
+    status.textContent = statusLabel;
+    li.appendChild(label);
+    li.appendChild(status);
     list.appendChild(li);
   });
 }
@@ -380,6 +470,7 @@ function getProfilePayload(profile) {
   return {
     ...profile,
     country: $("countrySelect")?.value || currentCountry,
+    currency: $("currencySelect")?.value || currentCurrency,
     bin: $("binInput")?.value?.replace(/\D/g, "") || profile.bin,
     email: $("emailInput")?.value?.trim() || ""
   };
@@ -399,7 +490,9 @@ async function applyProfileToUI(profile, options = {}) {
   if (!profile) return;
   activeProfileId = profile.id;
   currentCountry = profile.country || currentCountry;
+  currentCurrency = profile.currency || currentCurrency;
   if ($("countrySelect")) $("countrySelect").value = currentCountry;
+  if ($("currencySelect")) $("currencySelect").value = currentCurrency;
   if ($("binInput")) $("binInput").value = profile.bin || "";
   if ($("emailInput")) $("emailInput").value = profile.email || "";
   highlightBinPreset(profile.bin);
@@ -407,7 +500,7 @@ async function applyProfileToUI(profile, options = {}) {
   const pinRes = await sendBg("getPinnedStatus", {}, 8000);
   updatePinUI(pinRes?.pinned);
 
-  const addrRes = await sendBg("getAddress", { country: currentCountry }, 10000);
+  const addrRes = await sendBg("getAddress", { country: currentCountry, cacheOnly: true }, 5000);
   if (pinRes?.address) {
     lastAddress = profile.email
       ? { ...pinRes.address, email: profile.email, pinned: true }
@@ -511,15 +604,13 @@ function stopCardPolling(onDone) {
 
 function startCardPolling(onDone) {
   stopCardPolling();
-  safeSetHTML("cardStatusBadge", '<span class="badge badge-loading">⏳</span><span id="cardStatusText">Проверка карты...</span>');
-  safeSetStyle("cardStatusText", "color", "#94a3b8");
+  setCardStatus("⏳", "badge-loading", "Проверка карты...", "#94a3b8");
 
   cardPollTimer = setInterval(async () => {
     cardPollCount++;
     if (cardPollCount > CARD_POLL_MAX) {
       stopCardPolling(onDone);
-      safeSetHTML("cardStatusBadge", '<span class="badge badge-unavailable">⏱</span><span id="cardStatusText">Проверка зависла — нажмите «Новая»</span>');
-      safeSetStyle("cardStatusText", "color", "#a855f7");
+      setCardStatus("⏱", "badge-unavailable", "Проверка зависла — нажмите «Новая»", "#a855f7");
       setStatus("error", "Проверка карты зависла");
       return;
     }
@@ -587,8 +678,12 @@ async function refreshCardOnly(silent) {
     return;
   }
 
-  const cardRes = await sendBg("getCardCache", {}, 5000);
-  if (cardRes?.card) renderCard(cardRes.card);
+  if (res.card) renderCard(res.card);
+  else {
+    const cardRes = await sendBg("getCardCache", {}, 5000);
+    if (cardRes?.card) renderCard(cardRes.card);
+  }
+
   startCardPolling(() => {
     $("btnRefreshCard").disabled = false;
     setButtonsDisabled(false);
@@ -618,8 +713,12 @@ async function refreshAll() {
     return;
   }
 
-  const cardRes = await sendBg("getCardCache", {}, 5000);
-  if (cardRes?.card) renderCard(cardRes.card);
+  if (res2.card) renderCard(res2.card);
+  else {
+    const cardRes = await sendBg("getCardCache", {}, 5000);
+    if (cardRes?.card) renderCard(cardRes.card);
+  }
+
   startCardPolling(() => {
     setRefreshDisabled(false);
     setButtonsDisabled(false);
@@ -642,51 +741,29 @@ function copyCard() {
   copyText(`${lastCard.number}|${lastCard.month}|${lastCard.year}|${lastCard.cvv}`, "Карта");
 }
 
-function injectAndFill(tabId, mode) {
-  chrome.scripting.executeScript({
-    target: { tabId, allFrames: true },
-    files: ["content.js"]
-  }, () => {
-    if (chrome.runtime.lastError) {
-      setStatus("error", "Не удалось внедрить");
-      return;
-    }
-    setTimeout(() => {
-      chrome.tabs.sendMessage(tabId, { action: "fillNow", mode }, res => {
-        if (chrome.runtime.lastError) {
-          setStatus("error", "Ошибка инъекции");
-          return;
-        }
-        handleFillResult(res);
-      });
-    }, 1200);
-  });
-}
-
-function fillPage(mode) {
+async function fillPage(mode) {
   const labels = { all: "Всё", address: "Адрес", card: "Карта" };
-  chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
-    if (!tabs[0]) return;
-    const tabId = tabs[0].id;
-    setStatus("", `Заполнение: ${labels[mode] || mode}...`);
-    if ($("fillReportPanel")) $("fillReportPanel").hidden = true;
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tabs[0]?.id) return;
+  const tabId = tabs[0].id;
+  setStatus("", `Заполнение: ${labels[mode] || mode}...`);
+  if ($("fillReportPanel")) $("fillReportPanel").hidden = true;
 
-    chrome.tabs.sendMessage(tabId, { action: "fillNow", mode }, res => {
-      if (chrome.runtime.lastError) {
-        setStatus("", "Внедрение скрипта...");
-        injectAndFill(tabId, mode);
-        return;
-      }
-      handleFillResult(res);
-    });
-  });
+  const res = await sendBg("fillAllFrames", { tabId, mode }, 35000);
+  if (res?.error) {
+    setStatus("error", res.error === "timeout" ? "Таймаут заполнения" : "Ошибка заполнения");
+    refreshDevLogCount();
+    return;
+  }
+  handleFillResult(res);
+  refreshDevLogCount();
 }
 
 async function initPopup() {
   setupCopyOnClick();
   setStatus("", "Загрузка...");
 
-  const boot = await sendBg("getPopupBootstrap", {}, 20000);
+  const boot = await sendBg("getPopupBootstrap", {}, 10000);
   if (boot?.error) {
     setStatus("error", boot.error === "timeout" ? "Таймаут загрузки" : "Ошибка расширения");
     loadProfiles();
@@ -694,15 +771,17 @@ async function initPopup() {
     return;
   }
 
-  safeSetText("versionTag", `v${boot.version || "2.1.1"}`);
+  safeSetText("versionTag", `v${boot.version || "2.3.0"}`);
   profiles = boot.profiles || [];
   activeProfileId = boot.activeId || profiles[0]?.id || "default";
   currentCountry = boot.country || "US";
+  currentCurrency = boot.currency || "USD";
   lastAddress = boot.address || null;
   lastCard = boot.card || null;
 
   renderProfiles(activeProfileId);
   renderCountriesList(boot.countries, currentCountry);
+  renderCurrenciesList(boot.currencies, currentCurrency);
   renderBinPresetsList(boot.presets, boot.bin);
   applySettings(boot.settings);
   updateProfileSummary();
@@ -717,23 +796,24 @@ async function initPopup() {
   updatePinUI(boot.pinned);
   if (shortcutKbd && boot.shortcut) shortcutKbd.textContent = boot.shortcut;
   if ($("devModeToggle")) $("devModeToggle").checked = !!boot.devMode;
+  setDevLogCount(boot.devLogCount || 0);
 
   if (!lastAddress) {
     setStatus("", "Получение адреса...");
-    const refreshed = await sendBg("refreshAddress", { country: currentCountry });
+    const refreshed = await sendBg("refreshAddress", { country: currentCountry }, 12000);
     if (refreshed?.address) {
       lastAddress = refreshed.address;
       if (boot.email) lastAddress = { ...lastAddress, email: boot.email };
       renderAddress(lastAddress);
     }
+  } else {
+    setStatus("active", "Данные готовы");
   }
 
   if (lastCard?.validationStatus === "checking") {
     startCardPolling();
     setStatus("", "Проверка карты...");
-  } else if (lastAddress) {
-    setStatus("active", "Данные готовы");
-  } else {
+  } else if (!lastAddress) {
     setStatus("", "Нажмите «Новый» для адреса");
   }
 }
@@ -825,6 +905,8 @@ $("btnDeleteProfile")?.addEventListener("click", () => {
       if ($("emailInput")) $("emailInput").value = active.email || "";
       if ($("binInput")) $("binInput").value = active.bin || "";
       if ($("countrySelect")) $("countrySelect").value = active.country;
+      currentCurrency = active.currency || currentCurrency;
+      if ($("currencySelect")) $("currencySelect").value = currentCurrency;
       loadAddressForCountry(active.country);
     }
     setStatus("active", "Профиль удалён");
@@ -867,6 +949,8 @@ $("importFileInput")?.addEventListener("change", e => {
           if ($("emailInput")) $("emailInput").value = active.email || "";
           if ($("binInput")) $("binInput").value = active.bin || "";
           if ($("countrySelect")) $("countrySelect").value = active.country;
+          currentCurrency = active.currency || currentCurrency;
+          if ($("currencySelect")) $("currencySelect").value = currentCurrency;
           loadAddressForCountry(active.country);
         }
         setStatus("active", "Импорт выполнен ✅");
@@ -893,6 +977,19 @@ $("countrySelect")?.addEventListener("change", () => {
   });
 });
 
+$("currencySelect")?.addEventListener("change", () => {
+  const code = $("currencySelect").value;
+  chrome.runtime.sendMessage({ action: "setCurrency", currency: code }, res => {
+    if (!res?.code) {
+      setStatus("error", "Ошибка валюты");
+      return;
+    }
+    currentCurrency = res.code;
+    saveCurrentToProfile();
+    setStatus("active", `${res.code} ${res.symbol || ""} ✅`.trim());
+  });
+});
+
 $("btnSaveEmail")?.addEventListener("click", async () => {
   const email = $("emailInput")?.value?.trim() || "";
   const res = await sendBg("setUserEmail", { email }, 8000);
@@ -914,12 +1011,21 @@ $("emailInput")?.addEventListener("keydown", e => {
 });
 
 chrome.storage.local.get(["autoFillEnabled", "autoFillMode"], data => {
-  if ($("autoFillToggle")) $("autoFillToggle").checked = data.autoFillEnabled !== false;
+  const enabled = data.autoFillEnabled === true;
+  if ($("autoFillToggle")) $("autoFillToggle").checked = enabled;
+  updateAutoFillBetaNote(enabled);
   if ($("autoFillMode")) $("autoFillMode").value = data.autoFillMode || "all";
 });
 
 $("autoFillToggle")?.addEventListener("change", () => {
-  chrome.storage.local.set({ autoFillEnabled: $("autoFillToggle").checked });
+  const enabled = $("autoFillToggle").checked;
+  updateAutoFillBetaNote(enabled);
+  chrome.storage.local.set({ autoFillEnabled: enabled });
+  if (enabled) {
+    setStatus("", "Автозаполнение включено: функция дорабатывается, возможны баги");
+  } else {
+    setStatus("active", "Автозаполнение выключено");
+  }
 });
 
 $("autoFillMode")?.addEventListener("change", () => {
@@ -927,7 +1033,22 @@ $("autoFillMode")?.addEventListener("change", () => {
 });
 
 $("devModeToggle")?.addEventListener("change", () => {
-  chrome.runtime.sendMessage({ action: "setDevMode", devMode: $("devModeToggle").checked });
+  sendBg("setDevMode", { devMode: $("devModeToggle").checked }, 8000).then(() => {
+    refreshDevLogCount();
+    setStatus("active", $("devModeToggle").checked ? "Dev-логи включены" : "Dev-логи выключены");
+  });
+});
+
+$("btnDownloadDevLogs")?.addEventListener("click", () => {
+  downloadDevLogs().catch(() => setStatus("error", "Не удалось скачать dev-логи"));
+});
+
+$("btnCopyDevLogs")?.addEventListener("click", () => {
+  copyDevLogs().catch(() => setStatus("error", "Не удалось скопировать dev-логи"));
+});
+
+$("btnClearDevLogs")?.addEventListener("click", () => {
+  clearDevLogs().catch(() => setStatus("error", "Не удалось очистить dev-логи"));
 });
 
 $("soundMuteToggle")?.addEventListener("change", () => {

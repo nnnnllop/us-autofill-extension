@@ -1,11 +1,13 @@
 /* ═══════════════════════════════════════════════════════
    AutoFill — Background Service Worker
    — Адрес: пул реальных адресов + имя (randomuser.me)
-   — Карты: генерация (Лун) + валидация (namso / chkr)
+   — Карты: локальная генерация (Лун), внешняя проверка только по opt-in
    ═══════════════════════════════════════════════════════ */
 
 const SELECTED_COUNTRY_KEY = "selectedCountry";
+const PREFERRED_CURRENCY_KEY = "preferredCurrency";
 const DEFAULT_COUNTRY = "US";
+const DEFAULT_CURRENCY = "USD";
 const CACHE_TTL_MS = 30 * 60 * 1000;
 
 const CARD_CACHE_KEY = "cached_card";
@@ -20,8 +22,10 @@ const COMPACT_MODE_KEY = "compactMode";
 const SHOW_PROFILE_SUMMARY_KEY = "showProfileSummary";
 const STRIPE_FAB_KEY = "stripeFabEnabled";
 const ONBOARDING_DONE_KEY = "onboardingDone";
+const DEV_LOGS_KEY = "devLogs";
 const MAX_PROFILES = 50;
-const EXT_VERSION = "2.1.5";
+const MAX_DEV_LOGS = 500;
+const EXT_VERSION = "2.3.0";
 
 const DEFAULT_BIN = "5154620022";
 const BIN_STORAGE_KEY = "user_bin";
@@ -34,6 +38,66 @@ const BIN_PRESETS = [
 
 function addrCacheKey(country) { return `cached_address_${country}`; }
 function addrTsKey(country) { return `cached_address_ts_${country}`; }
+
+function cleanLogValue(value) {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch (_) {
+    return String(value);
+  }
+}
+
+async function appendDevLog(entry = {}) {
+  const data = await chrome.storage.local.get(DEV_LOGS_KEY);
+  const logs = Array.isArray(data[DEV_LOGS_KEY]) ? data[DEV_LOGS_KEY] : [];
+  const next = logs.concat({
+    ts: entry.ts || new Date().toISOString(),
+    level: String(entry.level || "info").slice(0, 16),
+    source: String(entry.source || "background").slice(0, 80),
+    message: cleanLogValue(entry.message).slice(0, 1200),
+    url: cleanLogValue(entry.url).slice(0, 500),
+    details: cleanLogValue(entry.details).slice(0, 1200)
+  }).slice(-MAX_DEV_LOGS);
+  await chrome.storage.local.set({ [DEV_LOGS_KEY]: next });
+  return next.length;
+}
+
+async function addDevLog(level, message, details = "") {
+  try {
+    const data = await chrome.storage.local.get(DEV_MODE_KEY);
+    if (!data[DEV_MODE_KEY]) return;
+    await appendDevLog({ level, source: "background", message, details });
+  } catch (_) {}
+}
+
+const COUNTRY_DEFAULT_CURRENCY = {
+  US: "USD", GB: "GBP", DE: "EUR", FR: "EUR", CA: "CAD", AU: "AUD",
+  NL: "EUR", IT: "EUR", ES: "EUR", PL: "PLN"
+};
+
+const CURRENCY_CONFIG = {
+  USD: { code: "USD", symbol: "$", name: "US Dollar", flag: "🇺🇸" },
+  EUR: { code: "EUR", symbol: "€", name: "Euro", flag: "🇪🇺" },
+  GBP: { code: "GBP", symbol: "£", name: "British Pound", flag: "🇬🇧" },
+  CAD: { code: "CAD", symbol: "C$", name: "Canadian Dollar", flag: "🇨🇦" },
+  AUD: { code: "AUD", symbol: "A$", name: "Australian Dollar", flag: "🇦🇺" },
+  PLN: { code: "PLN", symbol: "zł", name: "Polish Złoty", flag: "🇵🇱" },
+  SEK: { code: "SEK", symbol: "kr", name: "Swedish Krona", flag: "🇸🇪" },
+  CHF: { code: "CHF", symbol: "Fr", name: "Swiss Franc", flag: "🇨🇭" },
+  JPY: { code: "JPY", symbol: "¥", name: "Japanese Yen", flag: "🇯🇵" }
+};
+
+function currencyForCountry(countryCode) {
+  return COUNTRY_DEFAULT_CURRENCY[countryCode] || DEFAULT_CURRENCY;
+}
+
+function normalizeCurrency(code, countryCode) {
+  const upper = (code || "").toUpperCase();
+  if (CURRENCY_CONFIG[upper]) return upper;
+  return currencyForCountry(countryCode || DEFAULT_COUNTRY);
+}
 
 /* ═══════════════════════════════════════════════════════
    СТРАНЫ — пулы адресов и настройки
@@ -186,10 +250,22 @@ async function getProfiles() {
       id: "default",
       name: "Основной",
       country: DEFAULT_COUNTRY,
+      currency: DEFAULT_CURRENCY,
       bin: DEFAULT_BIN,
       email: ""
     }];
     await chrome.storage.local.set({ [PROFILES_KEY]: profiles, [ACTIVE_PROFILE_KEY]: "default" });
+  } else {
+    let migrated = false;
+    profiles = profiles.map(p => {
+      if (p.currency && CURRENCY_CONFIG[p.currency]) return p;
+      migrated = true;
+      return {
+        ...p,
+        currency: normalizeCurrency(p.currency, p.country || DEFAULT_COUNTRY)
+      };
+    });
+    if (migrated) await chrome.storage.local.set({ [PROFILES_KEY]: profiles });
   }
   const activeId = data[ACTIVE_PROFILE_KEY] || profiles[0].id;
   return { profiles, activeId };
@@ -203,7 +279,11 @@ async function getActiveProfile() {
 async function applyProfile(profile) {
   if (!profile) return;
   const prev = await getActiveProfile();
-  const updates = { [SELECTED_COUNTRY_KEY]: profile.country || DEFAULT_COUNTRY };
+  const country = profile.country || DEFAULT_COUNTRY;
+  const updates = {
+    [SELECTED_COUNTRY_KEY]: country,
+    [PREFERRED_CURRENCY_KEY]: normalizeCurrency(profile.currency, country)
+  };
   const newBin = (profile.bin || DEFAULT_BIN).replace(/\D/g, "");
   updates[BIN_STORAGE_KEY] = newBin;
   updates[USER_EMAIL_KEY] = (profile.email || "").trim();
@@ -221,6 +301,7 @@ async function saveProfile(profileData) {
     id: profileData.id || profileId(),
     name: (profileData.name || "Профиль").trim().slice(0, 24),
     country: COUNTRY_CONFIG[profileData.country] ? profileData.country : DEFAULT_COUNTRY,
+    currency: normalizeCurrency(profileData.currency, profileData.country),
     bin: (profileData.bin || DEFAULT_BIN).replace(/\D/g, ""),
     email: (profileData.email || "").trim()
   };
@@ -240,6 +321,7 @@ async function saveProfile(profileData) {
     await chrome.storage.local.set({
       [USER_EMAIL_KEY]: entry.email,
       [SELECTED_COUNTRY_KEY]: entry.country,
+      [PREFERRED_CURRENCY_KEY]: entry.currency,
       [BIN_STORAGE_KEY]: entry.bin
     });
     if (prev?.bin !== entry.bin || prev?.country !== entry.country) {
@@ -292,6 +374,15 @@ async function getSelectedCountry() {
   const data = await chrome.storage.local.get(SELECTED_COUNTRY_KEY);
   const code = data[SELECTED_COUNTRY_KEY] || DEFAULT_COUNTRY;
   return COUNTRY_CONFIG[code] ? code : DEFAULT_COUNTRY;
+}
+
+async function getSelectedCurrency() {
+  const active = await getActiveProfile();
+  if (active?.currency && CURRENCY_CONFIG[active.currency]) return active.currency;
+  const data = await chrome.storage.local.get(PREFERRED_CURRENCY_KEY);
+  const stored = data[PREFERRED_CURRENCY_KEY];
+  if (stored && CURRENCY_CONFIG[stored]) return stored;
+  return currencyForCountry(await getSelectedCountry());
 }
 
 function makeEmail(firstName, lastName) {
@@ -388,6 +479,19 @@ async function fetchAddress(countryCode, options = {}) {
   };
 }
 
+async function readStoredAddress(countryCode) {
+  const country = countryCode || await getSelectedCountry();
+  const cacheKey = addrCacheKey(country);
+  const pinned = await getPinnedAddress();
+
+  if (pinned && pinned.pinnedCountry === country) {
+    return mergeAddressEmail(pinned);
+  }
+
+  const cached = await chrome.storage.local.get(cacheKey);
+  return cached[cacheKey] || null;
+}
+
 async function getCachedAddress(countryCode) {
   const country = countryCode || await getSelectedCountry();
   const cacheKey = addrCacheKey(country);
@@ -415,13 +519,17 @@ async function getCachedAddress(countryCode) {
 
 function sanitizeImportedProfiles(raw) {
   if (!Array.isArray(raw)) return null;
-  return raw.slice(0, MAX_PROFILES).map((p, i) => ({
-    id: p.id || profileId(),
-    name: String(p.name || `Профиль ${i + 1}`).trim().slice(0, 32),
-    country: COUNTRY_CONFIG[p.country] ? p.country : DEFAULT_COUNTRY,
-    bin: String(p.bin || DEFAULT_BIN).replace(/\D/g, "").slice(0, 15) || DEFAULT_BIN,
-    email: String(p.email || "").trim().slice(0, 120)
-  }));
+  return raw.slice(0, MAX_PROFILES).map((p, i) => {
+    const country = COUNTRY_CONFIG[p.country] ? p.country : DEFAULT_COUNTRY;
+    return {
+      id: p.id || profileId(),
+      name: String(p.name || `Профиль ${i + 1}`).trim().slice(0, 32),
+      country,
+      currency: normalizeCurrency(p.currency, country),
+      bin: String(p.bin || DEFAULT_BIN).replace(/\D/g, "").slice(0, 15) || DEFAULT_BIN,
+      email: String(p.email || "").trim().slice(0, 120)
+    };
+  });
 }
 
 async function exportProfilesData() {
@@ -716,7 +824,7 @@ async function startCardCheck() {
   const card = await generateCardInstant();
   await chrome.storage.local.set({ [CARD_CACHE_KEY]: card, [CARD_TS_KEY]: Date.now() });
   backgroundCheck(checkId);
-  return { started: true };
+  return { started: true, checking: true, card };
 }
 
 async function recoverStaleCard(card) {
@@ -740,19 +848,21 @@ async function getCachedCard() {
 }
 
 async function getPopupBootstrap() {
-  const [{ profiles, activeId }, country, email, bin, settingsData] = await Promise.all([
+  const [{ profiles, activeId }, country, currency, email, bin, settingsData, devLogsData] = await Promise.all([
     getProfiles(),
     getSelectedCountry(),
+    getSelectedCurrency(),
     getUserEmail(),
     getBin(),
     chrome.storage.local.get([
       DEV_MODE_KEY, SOUND_MUTED_KEY, COMPACT_MODE_KEY,
       SHOW_PROFILE_SUMMARY_KEY, STRIPE_FAB_KEY, ONBOARDING_DONE_KEY
-    ])
+    ]),
+    chrome.storage.local.get(DEV_LOGS_KEY)
   ]);
 
   const [addr, card, pinned] = await Promise.all([
-    getCachedAddress(country),
+    readStoredAddress(country),
     getCachedCard(),
     getPinnedAddress()
   ]);
@@ -769,6 +879,8 @@ async function getPopupBootstrap() {
     profiles,
     activeId,
     country,
+    currency,
+    currencies: getCurrenciesList(),
     address: await mergeAddressEmail(addr),
     card,
     pinned: !!(pinned && pinned.pinnedCountry === country),
@@ -778,6 +890,7 @@ async function getPopupBootstrap() {
     presets: BIN_PRESETS,
     shortcut,
     devMode: !!settingsData[DEV_MODE_KEY],
+    devLogCount: Array.isArray(devLogsData[DEV_LOGS_KEY]) ? devLogsData[DEV_LOGS_KEY].length : 0,
     settings: {
       soundMuted: !!settingsData[SOUND_MUTED_KEY],
       compactMode: !!settingsData[COMPACT_MODE_KEY],
@@ -792,6 +905,15 @@ function getCountriesList() {
   return Object.entries(COUNTRY_CONFIG).map(([code, cfg]) => ({
     code,
     name: cfg.name,
+    flag: cfg.flag
+  }));
+}
+
+function getCurrenciesList() {
+  return Object.values(CURRENCY_CONFIG).map(cfg => ({
+    code: cfg.code,
+    name: cfg.name,
+    symbol: cfg.symbol,
     flag: cfg.flag
   }));
 }
@@ -826,8 +948,35 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.action === "getCurrencies") {
+    sendResponse({ currencies: getCurrenciesList() });
+    return true;
+  }
+
+  if (msg.action === "getSelectedCurrency") {
+    getSelectedCurrency().then(code => {
+      const cfg = CURRENCY_CONFIG[code];
+      sendResponse({ code, name: cfg?.name, symbol: cfg?.symbol, flag: cfg?.flag });
+    });
+    return true;
+  }
+
+  if (msg.action === "setCurrency") {
+    const code = normalizeCurrency(msg.currency);
+    if (!CURRENCY_CONFIG[code]) {
+      sendResponse({ error: "Unknown currency" });
+      return true;
+    }
+    chrome.storage.local.set({ [PREFERRED_CURRENCY_KEY]: code }).then(() => {
+      const cfg = CURRENCY_CONFIG[code];
+      sendResponse({ code, name: cfg.name, symbol: cfg.symbol, flag: cfg.flag });
+    });
+    return true;
+  }
+
   if (msg.action === "getAddress") {
-    getCachedAddress(msg.country).then(addr => sendResponse({ address: addr }));
+    const load = msg.cacheOnly ? readStoredAddress : getCachedAddress;
+    load(msg.country).then(addr => sendResponse({ address: addr }));
     return true;
   }
 
@@ -998,8 +1147,34 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.action === "setDevMode") {
     chrome.storage.local.set({ [DEV_MODE_KEY]: !!msg.devMode }).then(() => {
+      if (msg.devMode) appendDevLog({ level: "info", source: "background", message: "Dev-логи включены" }).catch(() => {});
       sendResponse({ devMode: !!msg.devMode });
     });
+    return true;
+  }
+
+  if (msg.action === "appendDevLog") {
+    chrome.storage.local.get(DEV_MODE_KEY, d => {
+      if (!d[DEV_MODE_KEY]) {
+        sendResponse({ ok: true, skipped: true });
+        return;
+      }
+      appendDevLog(msg.entry || {})
+        .then(count => sendResponse({ ok: true, count }))
+        .catch(err => sendResponse({ ok: false, error: String(err?.message || err) }));
+    });
+    return true;
+  }
+
+  if (msg.action === "getDevLogs") {
+    chrome.storage.local.get(DEV_LOGS_KEY, d => {
+      sendResponse({ logs: Array.isArray(d[DEV_LOGS_KEY]) ? d[DEV_LOGS_KEY] : [] });
+    });
+    return true;
+  }
+
+  if (msg.action === "clearDevLogs") {
+    chrome.storage.local.remove(DEV_LOGS_KEY).then(() => sendResponse({ ok: true }));
     return true;
   }
 
@@ -1018,10 +1193,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.action === "fillAllFrames") {
+    const tabId = msg.tabId || sender.tab?.id;
+    if (!tabId) {
+      sendResponse({ error: "no_tab", filled: 0, success: false });
+      return true;
+    }
+    fillTabAllFrames(tabId, msg.mode || "all")
+      .then(data => sendResponse(data))
+      .catch(err => {
+        console.error("[BG] fillAllFrames error:", err);
+        sendResponse({ error: String(err?.message || err), filled: 0, success: false });
+      });
+    return true;
+  }
+
   if (msg.action === "getAllData") {
     (async () => {
       try {
         const country = await getSelectedCountry();
+        const currency = await getSelectedCurrency();
         const [addr, card, pinned] = await Promise.all([
           getCachedAddress(country), getCachedCard(), getPinnedAddress()
         ]);
@@ -1031,6 +1222,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           address,
           card,
           country,
+          currency,
           devMode: !!d[DEV_MODE_KEY],
           soundMuted: !!d[SOUND_MUTED_KEY],
           pinned: !!(pinned && pinned.pinnedCountry === country)
@@ -1044,19 +1236,182 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 });
 
+function mergeFillResults(results) {
+  const valid = results.filter(r => r && !r.error && typeof r.filled === "number");
+  if (!valid.length) {
+    return { filled: 0, success: false, message: "Ошибка заполнения", report: [] };
+  }
+  const best = valid.reduce((a, b) => ((b.filled || 0) > (a.filled || 0) ? b : a));
+  const filled = valid.reduce((sum, r) => sum + (r.filled || 0), 0);
+  return {
+    ...best,
+    filled,
+    message: filled > 0 ? `Заполнено ${filled}` : (best.message || "Нечего заполнять"),
+    success: filled > 0 || !!best.success
+  };
+}
+
+async function getFillPayload() {
+  const country = await getSelectedCountry();
+  const currency = await getSelectedCurrency();
+  const [addr, card, pinned] = await Promise.all([
+    getCachedAddress(country),
+    getCachedCard(),
+    getPinnedAddress()
+  ]);
+  const address = await mergeAddressEmail(addr);
+  const d = await chrome.storage.local.get([DEV_MODE_KEY, SOUND_MUTED_KEY]);
+  return {
+    address,
+    card,
+    country,
+    currency,
+    devMode: !!d[DEV_MODE_KEY],
+    soundMuted: !!d[SOUND_MUTED_KEY],
+    pinned: !!(pinned && pinned.pinnedCountry === country)
+  };
+}
+
+function scriptTarget(tabId, frameIds = null) {
+  return Array.isArray(frameIds) && frameIds.length
+    ? { tabId, frameIds }
+    : { tabId, allFrames: true };
+}
+
+async function resetFillScriptGuards(tabId, frameIds = null) {
+  try {
+    await chrome.scripting.executeScript({
+      target: scriptTarget(tabId, frameIds),
+      func: () => {
+        try { delete globalThis.__US_AUTOFILL_V2_READY__; } catch (_) {}
+        try { document.documentElement?.removeAttribute("data-us-autofill-active"); } catch (_) {}
+      }
+    });
+  } catch (err) {
+    await addDevLog("warn", "Не удалось сбросить guard content script", String(err?.message || err));
+  }
+}
+
+async function ensureFillScripts(tabId, frameIds = null) {
+  await resetFillScriptGuards(tabId, frameIds);
+
+  try {
+    await chrome.scripting.insertCSS({
+      target: scriptTarget(tabId, frameIds),
+      files: ["content.css"]
+    });
+  } catch (err) {
+    await addDevLog("warn", "Не удалось вставить CSS перед заполнением", String(err?.message || err));
+  }
+
+  try {
+    await chrome.scripting.executeScript({
+      target: scriptTarget(tabId, frameIds),
+      files: ["content.js"]
+    });
+    return true;
+  } catch (err) {
+    await addDevLog("warn", "Не удалось вставить content.js перед заполнением", String(err?.message || err));
+    return false;
+  }
+}
+
+async function sendFillToFrame(tabId, frameId, mode, fillData, retries = 1) {
+  for (let i = 0; i < retries; i++) {
+    const res = await new Promise(resolve => {
+      chrome.tabs.sendMessage(
+        tabId,
+        { action: "fillNow", mode, fillData },
+        { frameId },
+        response => {
+          if (chrome.runtime.lastError) resolve(null);
+          else resolve(response ?? null);
+        }
+      );
+    });
+    if (res) return res;
+    if (i < retries - 1) await new Promise(r => setTimeout(r, 300));
+  }
+  return null;
+}
+
+function isRelevantFillFrame(f) {
+  const h = `${f.host} ${f.href}`;
+  if (f.frameId === 0) return true;
+  if (/embedded-checkout|js\.stripe\.com|elements\.stripe|stripe/.test(h)) return true;
+  return false;
+}
+
+async function fillTabAllFrames(tabId, mode = "all") {
+  await addDevLog("info", "Запуск ручного заполнения", { tabId, mode });
+
+  const fillData = await getFillPayload();
+  let main = await sendFillToFrame(tabId, 0, mode, fillData, 1);
+  if (!main) {
+    await addDevLog("warn", "Основной фрейм не ответил, выполняю доинжект content script", { tabId, mode });
+    await ensureFillScripts(tabId);
+    main = await sendFillToFrame(tabId, 0, mode, fillData, 2);
+  }
+  if (main?.filled > 0) {
+    await addDevLog("info", "Основной фрейм заполнил поля, проверяю iframe", { filled: main.filled, success: main.success });
+  } else if (main) {
+    await addDevLog("info", "Основной фрейм не заполнил поля, проверяю iframe", { filled: main.filled || 0, success: main.success });
+  }
+
+  let iframeFrames = [];
+  try {
+    const hosts = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: () => ({ host: location.hostname, href: location.href })
+    });
+    if (hosts.length) {
+      iframeFrames = hosts
+        .map(p => ({ frameId: p.frameId, host: p.result?.host || "", href: p.result?.href || "" }))
+        .filter(f => f.frameId !== 0 && isRelevantFillFrame(f));
+    }
+  } catch (_) {}
+
+  if (!iframeFrames.length) {
+    await addDevLog("warn", "Нет доступных iframe для дополнительного заполнения", { main });
+    return main || { filled: 0, success: false, message: "Ошибка заполнения", report: [] };
+  }
+
+  await addDevLog("info", "Найдены iframe для заполнения", iframeFrames.map(f => `${f.frameId}:${f.host}`).join(", "));
+
+  const frameScore = f => {
+    const h = `${f.host} ${f.href}`;
+    if (/embedded-checkout-inner|embedded-checkout/.test(h)) return 0;
+    if (f.host === "js.stripe.com") return 1;
+    if (/stripe/.test(h)) return 2;
+    return 3;
+  };
+  iframeFrames.sort((a, b) => frameScore(a) - frameScore(b));
+
+  let extras = await Promise.all(
+    iframeFrames.map(({ frameId }) => sendFillToFrame(tabId, frameId, mode, fillData, 1))
+  );
+
+  if (!extras.some(Boolean)) {
+    const frameIds = iframeFrames.map(f => f.frameId);
+    await addDevLog("warn", "iframe не ответили, выполняю доинжект в iframe", frameIds.join(", "));
+    await ensureFillScripts(tabId, frameIds);
+    extras = await Promise.all(
+      iframeFrames.map(({ frameId }) => sendFillToFrame(tabId, frameId, mode, fillData, 2))
+    );
+  }
+
+  const merged = mergeFillResults([main, ...extras].filter(Boolean));
+  await addDevLog("info", "Итог заполнения", { filled: merged.filled, success: merged.success, message: merged.message });
+  return merged;
+}
+
 chrome.commands.onCommand.addListener(async (command) => {
   if (command !== "fill-page") return;
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) return;
   try {
-    await chrome.tabs.sendMessage(tab.id, { action: "fillNow", mode: "all" });
-  } catch {
-    await chrome.scripting.executeScript({
-      target: { tabId: tab.id, allFrames: true },
-      files: ["content.js"]
-    });
-    setTimeout(() => {
-      chrome.tabs.sendMessage(tab.id, { action: "fillNow", mode: "all" });
-    }, 800);
+    await fillTabAllFrames(tab.id, "all");
+  } catch (err) {
+    console.error("[BG] fill-page error:", err);
   }
 });

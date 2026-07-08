@@ -800,6 +800,29 @@ body {
   gap: 10px;
 }
 
+.footer-note {
+  grid-column: 1 / -1;
+  justify-content: flex-start;
+  padding: 5px 7px;
+  border: 1px solid rgba(245, 158, 11, 0.2);
+  border-radius: 6px;
+  background: rgba(245, 158, 11, 0.08);
+  color: var(--warning);
+  font-size: 9px;
+  line-height: 1.35;
+}
+
+.footer-dev-actions {
+  grid-column: 1 / -1;
+}
+
+.dev-log-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
 .footer-label--dim {
   color: var(--text-dim);
 }
@@ -841,6 +864,12 @@ body {
 .btn-mini:hover {
   background: var(--surface-hover);
   color: var(--text);
+}
+
+.btn-mini--danger:hover {
+  border-color: rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--danger);
 }
 
 .control-row--actions {
