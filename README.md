@@ -6,7 +6,7 @@
 
 ![Версия](https://img.shields.io/badge/версия-2.3.0-green)
 ![Manifest](https://img.shields.io/badge/Manifest-V3-blue)
-![Лицензия](https://img.shields.io/badge/лицензия-MIT-lightgrey)
+![Лицензия](https://img.shields.io/badge/лицензия-GPL--3.0--or--later-lightgrey)
 
 ---
 
@@ -173,7 +173,7 @@ node --check popup/popup.js
 
 ## Лицензия
 
-MIT — см. [LICENSE](LICENSE).
+GPL-3.0-or-later — см. [LICENSE](LICENSE).
 
 ---
 
