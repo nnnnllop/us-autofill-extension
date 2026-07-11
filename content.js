@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════
-   AutoFill — Content Script v2.3.0
+   AutoFill — Content Script v2.3.1
    ═══════════════════════════════════════════════════════ */
 
 (() => {
@@ -200,11 +200,12 @@ let devMode = false;
 let stripePrepDone = false;
 let stripeCurrencyDone = false;
 let observerDebounce = null;
-let stripeFillDebounce = null;
 let fillInProgress = false;
 let stripeFabEl = null;
 let lastAutoFillAt = 0;
 let fastFillMode = false;
+let autoFillEnabled = false;
+let autoFillMode = "all";
 const AUTO_FILL_MIN_INTERVAL_MS = 5000;
 const GET_DATA_TIMEOUT_MS = 8000;
 
@@ -271,6 +272,19 @@ function loadDevMode() {
   if (!isExtAlive()) return;
   try {
     chrome.storage.local.get(["devMode"], d => { devMode = !!d.devMode; });
+  } catch (_) {}
+}
+
+function loadAutoFillSettings() {
+  if (!isExtAlive()) return;
+  try {
+    chrome.storage.local.get(["autoFillEnabled", "autoFillMode"], data => {
+      autoFillEnabled = data.autoFillEnabled === true;
+      autoFillMode = ["all", "address", "card"].includes(data.autoFillMode)
+        ? data.autoFillMode
+        : "all";
+      if (autoFillEnabled && IS_TOP_FRAME) scheduleObserverFill(200);
+    });
   } catch (_) {}
 }
 
@@ -348,7 +362,11 @@ function dispatchEvents(el) {
 }
 
 function setNativeValue(el, value) {
-  const proto = el.tagName === "SELECT" ? HTMLSelectElement : HTMLInputElement;
+  const proto = el.tagName === "SELECT"
+    ? HTMLSelectElement
+    : el.tagName === "TEXTAREA"
+      ? HTMLTextAreaElement
+      : HTMLInputElement;
   const setter = Object.getOwnPropertyDescriptor(proto.prototype, "value")?.set;
   if (setter) setter.call(el, value);
   else el.value = value;
@@ -480,21 +498,21 @@ const COUNTRY_DISPLAY_NAMES = {
 };
 
 const CURRENCY_STRIPE_MATCH = {
-  USD: { labels: [/^US$/i, /^USD$/i, /\$/], data: "usd", names: [/united states/i, /us dollar/i] },
-  EUR: { labels: [/^EUR$/i, /^EU$/i, /€/], data: "eur", names: [/euro/i, /eur\b/i] },
-  GBP: { labels: [/^GB$/i, /^GBP$/i, /£/], data: "gbp", names: [/united kingdom/i, /british pound/i] },
-  CAD: { labels: [/^CA$/i, /^CAD$/i, /C\$/], data: "cad", names: [/canada/i, /canadian dollar/i] },
-  AUD: { labels: [/^AU$/i, /^AUD$/i, /A\$/], data: "aud", names: [/australia/i, /australian dollar/i] },
-  PLN: { labels: [/^PL$/i, /^PLN$/i, /zł/i], data: "pln", names: [/poland/i, /polish/i, /złot/i] },
-  SEK: { labels: [/^SE$/i, /^SEK$/i, /kr\b/i], data: "sek", names: [/sweden/i, /swedish/i, /krona/i] },
-  CHF: { labels: [/^CH$/i, /^CHF$/i], data: "chf", names: [/switzerland/i, /swiss/i] },
-  JPY: { labels: [/^JP$/i, /^JPY$/i, /¥/], data: "jpy", names: [/japan/i, /yen/i] }
+  USD: { labels: [/^US$/i, /^USD(?:\s|$)/i], data: "usd", names: [/united states/i, /us dollar/i] },
+  EUR: { labels: [/^EU$/i, /^EUR(?:\s|$)/i], data: "eur", names: [/euro/i] },
+  GBP: { labels: [/^GB$/i, /^GBP(?:\s|$)/i], data: "gbp", names: [/united kingdom/i, /british pound/i] },
+  CAD: { labels: [/^CA$/i, /^CAD(?:\s|$)/i], data: "cad", names: [/canada/i, /canadian dollar/i] },
+  AUD: { labels: [/^AU$/i, /^AUD(?:\s|$)/i], data: "aud", names: [/australia/i, /australian dollar/i] },
+  PLN: { labels: [/^PL$/i, /^PLN(?:\s|$)/i], data: "pln", names: [/poland/i, /polish/i, /złot/i] },
+  SEK: { labels: [/^SE$/i, /^SEK(?:\s|$)/i], data: "sek", names: [/sweden/i, /swedish/i, /krona/i] },
+  CHF: { labels: [/^CH$/i, /^CHF(?:\s|$)/i], data: "chf", names: [/switzerland/i, /swiss/i] },
+  JPY: { labels: [/^JP$/i, /^JPY(?:\s|$)/i], data: "jpy", names: [/japan/i, /yen/i] }
 };
 
 function currencyStripeMatch(currencyCode) {
   const code = (currencyCode || "USD").toUpperCase();
   return CURRENCY_STRIPE_MATCH[code] || {
-    labels: [new RegExp(`^${code}$`, "i")],
+    labels: [new RegExp(`^${code}(?:\\s|$)`, "i")],
     data: code.toLowerCase(),
     names: []
   };
@@ -515,7 +533,6 @@ function textMatchesCurrency(text, currencyCode) {
   if (raw.split("\n").some(l => lineMatchesCurrency(l, code))) return true;
   if (match.names?.some(re => re.test(raw))) return true;
   if (new RegExp(`\\b${code}\\b`, "i").test(raw)) return true;
-  if ((raw.toLowerCase().includes(match.data))) return true;
   return false;
 }
 
@@ -535,13 +552,14 @@ function currencyControlLabel(el) {
 function isCurrencyAlreadySelected(currencyCode) {
   const code = (currencyCode || "USD").toUpperCase();
   const match = currencyStripeMatch(code);
+  const section = findStripeCurrencySection();
   const checked = queryAllDeepRaw(
     'input[type="radio"]:checked, [role="radio"][aria-checked="true"], [aria-checked="true"][role="radio"]'
   );
   for (const el of checked) {
     const val = (el.value || el.getAttribute("data-value") || el.getAttribute("data-currency") || "").toLowerCase();
     if (val === match.data) return true;
-    if (textMatchesCurrency(currencyControlLabel(el), code)) return true;
+    if (isCurrencyControlInScope(el, section) && textMatchesCurrency(currencyControlLabel(el), code)) return true;
   }
   const selected = queryAllDeepRaw('[data-currency][aria-checked="true"], [data-currency].is-selected, [data-currency][class*="selected"]');
   for (const el of selected) {
@@ -553,12 +571,30 @@ function isCurrencyAlreadySelected(currencyCode) {
 
 function findStripeCurrencySection() {
   const headingRe = /choose a currency|choose your currency|select a currency|pay in/i;
-  for (const el of queryAllDeepRaw("div, section, fieldset, form")) {
-    const t = (el.textContent || "").slice(0, 240);
-    if (!headingRe.test(t)) continue;
-    if (el.querySelector('button, [role="button"], [role="radio"], input[type="radio"]')) return el;
+  const candidates = queryAllDeepRaw("h1, h2, h3, h4, legend, p, span, div");
+  for (const heading of candidates) {
+    const text = (heading.textContent || "").trim();
+    if (!text || text.length > 80 || !headingRe.test(text)) continue;
+
+    let node = heading;
+    for (let depth = 0; depth < 6 && node; depth++) {
+      const controls = node.querySelectorAll?.(
+        'input[type="radio"], [role="radio"], [data-currency], [data-value], button, [role="button"]'
+      );
+      if (controls && [...controls].some(control =>
+        hasExplicitCurrencyMetadata(control) || !isUnsafeCurrencyAction(control)
+      )) return node;
+      node = node.parentElement;
+    }
   }
   return null;
+}
+
+function isCurrencyControlInScope(el, section) {
+  if (!el) return false;
+  if (section?.contains(el)) return true;
+  const meta = `${el.name || ""} ${el.id || ""} ${el.getAttribute?.("aria-label") || ""}`;
+  return /currency/i.test(meta) || el.hasAttribute?.("data-currency");
 }
 
 function hasBillingAddressFields() {
@@ -1003,6 +1039,39 @@ async function fillCardZip(address, report, opts = {}) {
   return false;
 }
 
+function hasExplicitCurrencyMetadata(el) {
+  return !!el?.matches?.(
+    'input[type="radio"], [role="radio"], [data-currency], [data-value]'
+  );
+}
+
+function isUnsafeCurrencyAction(el) {
+  const action = el?.closest?.('button, input[type="submit"], input[type="image"], [role="button"]');
+  if (!action) return false;
+  if (hasExplicitCurrencyMetadata(action)) return false;
+
+  const type = (action.type || action.getAttribute("type") || "").toLowerCase();
+  const text = `${action.textContent || ""} ${action.getAttribute("aria-label") || ""}`.trim();
+  const submitsForm = type === "image" ||
+    (type === "submit" && (action.tagName !== "BUTTON" || !!action.form));
+  return submitsForm ||
+    /\b(pay|buy|purchase|submit|continue|complete|place order|processing)\b/i.test(text);
+}
+
+function isCurrencyChoiceControl(el, section = null) {
+  if (!el || isUnsafeCurrencyAction(el)) return false;
+  if (hasExplicitCurrencyMetadata(el)) return true;
+
+  if (el.tagName === "LABEL") {
+    const forId = el.getAttribute("for");
+    const input = forId ? document.getElementById(forId) : el.querySelector('input[type="radio"]');
+    if (input?.type === "radio") return true;
+  }
+
+  return !!section && section.contains(el) &&
+    el.matches('button, [role="button"], label, div[tabindex="0"], span[tabindex="0"]');
+}
+
 async function clickCurrencyControl(el) {
   if (!el) return false;
   try {
@@ -1013,6 +1082,7 @@ async function clickCurrencyControl(el) {
         : null;
       target = label || el.closest("label") || el;
     }
+    if (target.disabled || isUnsafeCurrencyAction(target)) return false;
     target.scrollIntoView?.({ block: "nearest", behavior: "auto" });
     target.click();
     await fillPause(120);
@@ -1031,34 +1101,37 @@ async function fillStripeCurrency(currencyCode, report) {
   }
 
   const section = findStripeCurrencySection();
-  const roots = section ? [section, document] : [document];
 
-  for (const root of roots) {
-    const dataSel = `[data-currency="${match.data}"], [data-value="${match.data}"], [value="${match.data}"]`;
-    for (const el of (root === document ? queryAllDeepRaw(dataSel) : [...root.querySelectorAll(dataSel)])) {
-      if (await clickCurrencyControl(el)) {
+  const dataSel = [
+    `[data-currency="${match.data}" i]`,
+    `[role="radio"][data-value="${match.data}" i]`,
+    `input[type="radio"][value="${match.data}" i]`
+  ].join(", ");
+  for (const el of queryAllDeepRaw(dataSel)) {
+    if (!isCurrencyChoiceControl(el, section)) continue;
+    if (await clickCurrencyControl(el)) {
+      setReportStatus(report, "currency", "filled");
+      return true;
+    }
+  }
+
+  for (const input of queryAllDeepRaw('input[type="radio"], [role="radio"]')) {
+    const val = (input.value || input.getAttribute("data-value") || input.getAttribute("data-currency") || "").toLowerCase();
+    const textMatch = isCurrencyControlInScope(input, section) &&
+      textMatchesCurrency(currencyControlLabel(input), code);
+    if (val === match.data || textMatch) {
+      if (await clickCurrencyControl(input)) {
         setReportStatus(report, "currency", "filled");
         return true;
       }
     }
   }
 
-  for (const root of roots) {
-    for (const input of (root === document ? queryAllDeepRaw('input[type="radio"]') : [...root.querySelectorAll('input[type="radio"]')])) {
-      const val = (input.value || input.getAttribute("data-value") || "").toLowerCase();
-      if (val === match.data || textMatchesCurrency(currencyControlLabel(input), code)) {
-        if (await clickCurrencyControl(input)) {
-          setReportStatus(report, "currency", "filled");
-          return true;
-        }
-      }
-    }
-  }
-
-  for (const root of roots) {
-    for (const el of (root === document
-      ? queryAllDeep('button, [role="button"], [role="radio"], label, div[tabindex="0"], span[tabindex="0"]')
-      : [...root.querySelectorAll('button, [role="button"], [role="radio"], label, div[tabindex="0"], span[tabindex="0"]')])) {
+  if (section) {
+    for (const el of section.querySelectorAll(
+      'button, [role="button"], [role="radio"], label, div[tabindex="0"], span[tabindex="0"]'
+    )) {
+      if (!isCurrencyChoiceControl(el, section)) continue;
       const labelText = currencyControlLabel(el);
       if (!textMatchesCurrency(labelText, code)) continue;
       if (await clickCurrencyControl(el)) {
@@ -1068,7 +1141,13 @@ async function fillStripeCurrency(currencyCode, report) {
     }
   }
 
-  for (const el of queryAllDeepRaw(`[aria-label*="${code}" i], [aria-label*="${match.data}" i]`)) {
+  const ariaSel = [
+    `input[type="radio"][aria-label*="${code}" i]`,
+    `[role="radio"][aria-label*="${code}" i]`,
+    `[data-currency][aria-label*="${code}" i]`
+  ].join(", ");
+  for (const el of queryAllDeepRaw(ariaSel)) {
+    if (!isCurrencyChoiceControl(el, section)) continue;
     if (await clickCurrencyControl(el)) {
       setReportStatus(report, "currency", "filled");
       return true;
@@ -1885,9 +1964,9 @@ function getAllData() {
 
 function retryDelaysForFrame(fillData) {
   if (fillData) {
-    if (!IS_TOP_FRAME || isStripeIframe()) return [0];
+    if (!IS_TOP_FRAME || isStripeIframe()) return [0, 250, 700];
     if (isStripeCheckoutPage() && hasEmbeddedStripeCheckout()) return [0];
-    return [0, 280];
+    return [0, 350, 900];
   }
   return FILL_RETRY_DELAYS;
 }
@@ -1956,7 +2035,11 @@ async function executeFillWithRetries(mode, fillData = null) {
       else stagnant = 0;
       lastCount = filledCount;
 
-      if (fastFillMode) break;
+      if (fastFillMode) {
+        const present = detectPresentFields(mode);
+        if (i === delays.length - 1 || (present.length > 0 && filledCount >= present.length)) break;
+        continue;
+      }
 
       if (!isStripeCheckoutPage()) {
         const present = detectPresentFields(mode);
@@ -1995,27 +2078,25 @@ function canAutoFillNow() {
 }
 
 function runAutoFill() {
-  if (!IS_TOP_FRAME || !canAutoFillNow() || !isExtAlive()) return;
-  try {
-    chrome.storage.local.get(["autoFillEnabled", "autoFillMode"], data => {
-      if (data.autoFillEnabled !== true) return;
-      if (!canAutoFillNow()) return;
-      lastAutoFillAt = Date.now();
-      executeFillWithRetries(data.autoFillMode || "all").catch(() => {});
-    });
-  } catch (_) {}
+  if (!IS_TOP_FRAME || !autoFillEnabled || !canAutoFillNow() || !isExtAlive()) return;
+  lastAutoFillAt = Date.now();
+  executeFillWithRetries(autoFillMode).catch(() => {});
 }
 
 function scheduleStripeFill(delay = 2000) {
-  if (!IS_TOP_FRAME || isStripeCheckoutPage()) return;
-  clearTimeout(stripeFillDebounce);
-  stripeFillDebounce = setTimeout(runAutoFill, delay);
+  scheduleObserverFill(delay);
 }
 
-function scheduleObserverFill() {
-  if (!IS_TOP_FRAME || isStripeCheckoutPage()) return;
-  clearTimeout(observerDebounce);
-  observerDebounce = setTimeout(runAutoFill, 2000);
+function scheduleObserverFill(delay = 2000) {
+  if (!IS_TOP_FRAME || !autoFillEnabled) return;
+  if (observerDebounce) return;
+
+  const elapsed = Date.now() - lastAutoFillAt;
+  const intervalWait = Math.max(0, AUTO_FILL_MIN_INTERVAL_MS - elapsed + 50);
+  observerDebounce = setTimeout(() => {
+    observerDebounce = null;
+    runAutoFill();
+  }, Math.max(delay, intervalWait));
 }
 
 /* ───────────── Init (once per frame) ───────────── */
@@ -2025,9 +2106,23 @@ function initContentScript() {
   document.documentElement.setAttribute(US_AF_INIT_ATTR, "1");
 
   loadDevMode();
+  loadAutoFillSettings();
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && changes.devMode) devMode = !!changes.devMode.newValue;
     if (area === "local" && changes.stripeFabEnabled) updateStripeFab();
+    if (area === "local" && changes.autoFillEnabled) {
+      autoFillEnabled = changes.autoFillEnabled.newValue === true;
+      if (autoFillEnabled) scheduleObserverFill(150);
+      else {
+        clearTimeout(observerDebounce);
+        observerDebounce = null;
+      }
+    }
+    if (area === "local" && changes.autoFillMode) {
+      autoFillMode = ["all", "address", "card"].includes(changes.autoFillMode.newValue)
+        ? changes.autoFillMode.newValue
+        : "all";
+    }
   });
 
   window.addEventListener("message", async (event) => {
@@ -2113,7 +2208,7 @@ function bootContentScript() {
   if (!IS_TOP_FRAME) return;
 
   const boot = () => {
-    if (!isStripeCheckoutPage()) setTimeout(runAutoFill, 1000);
+    setTimeout(runAutoFill, isStripeCheckoutPage() ? 1200 : 1000);
     updateStripeFab();
   };
 
@@ -2126,21 +2221,21 @@ function bootContentScript() {
       lastUrl = location.href;
       stripePrepDone = false;
       stripeCurrencyDone = false;
-      if (!isStripeCheckoutPage()) scheduleObserverFill();
+      scheduleObserverFill(500);
       updateStripeFab();
       return;
     }
     if (isStripeCheckoutPage()) {
       updateStripeFab();
+      scheduleObserverFill(900);
       return;
     }
-    const platform = detectPlatform();
-    if (platform !== "generic") {
-      const hasForm = document.querySelector(
-        'iframe[src*="js.stripe.com"], iframe[name^="__privateStripeFrame"], #billingAddressLine1'
-      );
-      if (hasForm) scheduleStripeFill(2000);
-    }
+    if (!autoFillEnabled) return;
+    const hasForm = document.querySelector(
+      'form, input:not([type="hidden"]), select, textarea, ' +
+      'iframe[src*="js.stripe.com"], iframe[name^="__privateStripeFrame"], #billingAddressLine1'
+    );
+    if (hasForm) scheduleStripeFill(1200);
   });
 
   const startObserver = () => observer.observe(document.body, { childList: true, subtree: true });

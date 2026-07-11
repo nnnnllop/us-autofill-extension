@@ -1,7 +1,7 @@
 /* ═══════════════════════════════════════════════════════
    AutoFill — Background Service Worker
    — Адрес: пул реальных адресов + имя (randomuser.me)
-   — Карты: локальная генерация (Лун), внешняя проверка только по opt-in
+   — Карты: локальная генерация (Лун), внешняя проверка с MV3-восстановлением
    ═══════════════════════════════════════════════════════ */
 
 const SELECTED_COUNTRY_KEY = "selectedCountry";
@@ -12,6 +12,8 @@ const CACHE_TTL_MS = 30 * 60 * 1000;
 
 const CARD_CACHE_KEY = "cached_card";
 const CARD_TS_KEY = "cached_card_ts";
+const CARD_CHECK_JOB_KEY = "card_check_job";
+const CARD_CHECK_ALARM_NAME = "autofill-card-check";
 const USER_EMAIL_KEY = "userEmail";
 const PROFILES_KEY = "profiles";
 const ACTIVE_PROFILE_KEY = "activeProfileId";
@@ -25,7 +27,7 @@ const ONBOARDING_DONE_KEY = "onboardingDone";
 const DEV_LOGS_KEY = "devLogs";
 const MAX_PROFILES = 50;
 const MAX_DEV_LOGS = 500;
-const EXT_VERSION = "2.3.0";
+const EXT_VERSION = "2.4.0";
 
 const DEFAULT_BIN = "5154620022";
 const BIN_STORAGE_KEY = "user_bin";
@@ -290,7 +292,7 @@ async function applyProfile(profile) {
   await chrome.storage.local.set(updates);
   await chrome.storage.local.set({ [ACTIVE_PROFILE_KEY]: profile.id });
   if (prev?.id !== profile.id || prev?.bin !== newBin) {
-    await chrome.storage.local.remove([CARD_CACHE_KEY, CARD_TS_KEY]);
+    await clearCachedCard();
   }
 }
 
@@ -325,7 +327,7 @@ async function saveProfile(profileData) {
       [BIN_STORAGE_KEY]: entry.bin
     });
     if (prev?.bin !== entry.bin || prev?.country !== entry.country) {
-      await chrome.storage.local.remove([CARD_CACHE_KEY, CARD_TS_KEY]);
+      await clearCachedCard();
     }
   }
 
@@ -337,7 +339,10 @@ async function deleteProfile(id) {
   if (profiles.length <= 1) return { error: "last_profile" };
   const next = profiles.filter(p => p.id !== id);
   await chrome.storage.local.set({ [PROFILES_KEY]: next });
-  if (activeId === id) await applyProfile(next[0]);
+  if (activeId === id) {
+    await clearCachedCard();
+    await applyProfile(next[0]);
+  }
   return { profiles: next, activeId: activeId === id ? next[0].id : activeId };
 }
 
@@ -547,6 +552,7 @@ async function importProfilesData(payload) {
   if (!list || list.length === 0) return { error: "invalid_data" };
   const activeId = list.find(p => p.id === payload.activeProfileId)?.id || list[0].id;
   await chrome.storage.local.set({ [PROFILES_KEY]: list, [ACTIVE_PROFILE_KEY]: activeId });
+  await clearCachedCard();
   const active = list.find(p => p.id === activeId);
   if (active) await applyProfile(active);
   return { profiles: list, activeId };
@@ -646,12 +652,22 @@ async function generateFullCard() {
 
 const API_TIMEOUT_MS = 8000;
 const NAME_FETCH_TIMEOUT_MS = 6000;
-const CARD_CHECK_STALE_MS = 90000;
+const CARD_CHECK_STALE_MS = 180000;
 
-const CHECK_APIS = [
-  { name: "namso.live", url: "https://namso.live/api/v1/check.php", consecutive429: 0, disabledUntil: 0 },
-  { name: "chkr.cc", url: "https://api.chkr.cc/", consecutive429: 0, disabledUntil: 0 }
-];
+const CHECK_APIS = Object.freeze([
+  { id: "namso", name: "namso.live", url: "https://namso.live/api/v1/check.php" },
+  { id: "chkr", name: "chkr.cc", url: "https://api.chkr.cc/" }
+]);
+const CARD_CHECK_MAX_ATTEMPTS = 2;
+const CARD_CHECK_LEASE_MS = API_TIMEOUT_MS * CHECK_APIS.length + 5000;
+const API_COOLDOWN_MS = 60000;
+
+const checkApiHealth = new Map(CHECK_APIS.map(api => [api.id, {
+  consecutiveFailures: 0,
+  disabledUntil: 0
+}]));
+
+let activeCardCheckJobId = null;
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -661,29 +677,55 @@ function fetchWithTimeout(url, options, timeoutMs) {
   return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
 }
 
-function getActiveAPI() {
+function getCheckApiOrder() {
   const now = Date.now();
-  for (const api of CHECK_APIS) {
-    if (now >= api.disabledUntil) { api.consecutive429 = 0; return api; }
-  }
-  CHECK_APIS.sort((a, b) => a.disabledUntil - b.disabledUntil);
-  return CHECK_APIS[0];
+  return [...CHECK_APIS].sort((a, b) => {
+    const healthA = checkApiHealth.get(a.id);
+    const healthB = checkApiHealth.get(b.id);
+    const disabledA = healthA.disabledUntil > now ? 1 : 0;
+    const disabledB = healthB.disabledUntil > now ? 1 : 0;
+    return disabledA - disabledB ||
+      healthA.disabledUntil - healthB.disabledUntil ||
+      healthA.consecutiveFailures - healthB.consecutiveFailures;
+  });
 }
 
-async function checkWithNamso(cardRaw) {
+function markCheckApiSuccess(api) {
+  const health = checkApiHealth.get(api.id);
+  health.consecutiveFailures = 0;
+  health.disabledUntil = 0;
+}
+
+function markCheckApiFailure(api, result) {
+  const health = checkApiHealth.get(api.id);
+  health.consecutiveFailures++;
+  if (result?.status === "rate_limited" || health.consecutiveFailures >= 2) {
+    health.disabledUntil = Date.now() + API_COOLDOWN_MS;
+  }
+}
+
+async function checkWithNamso(api, cardRaw) {
   const [cc, mes, ano, cvv] = cardRaw.split("|");
+  const startTime = Date.now();
   try {
-    const res = await fetchWithTimeout(CHECK_APIS[0].url, {
+    const res = await fetchWithTimeout(api.url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ cc, mes, ano, cvv })
     }, API_TIMEOUT_MS);
-    if (res.status === 429) return { code: -1, status: "rate_limited" };
+    const duration = Date.now() - startTime;
+    if (res.status === 429) {
+      return { api: api.name, code: -1, status: "rate_limited", message: "Limit exceeded", time: duration };
+    }
     if (!res.ok) throw new Error(`namso ${res.status}`);
     const data = await res.json();
     if (data.status === "APPROVED" || data.code === "85") {
       return {
-        code: 1, status: "Live", message: data.message || "Approved",
+        api: api.name,
+        code: 1,
+        status: "APPROVED",
+        message: data.message || "Approved",
+        time: duration,
         card: {
           type: (data.card_info?.brand || "").toLowerCase(),
           category: (data.card_info?.type || "").toLowerCase(),
@@ -692,47 +734,169 @@ async function checkWithNamso(cardRaw) {
         }
       };
     }
-    return { code: 0, status: "Die", message: data.message || data.status || "Declined" };
+    return {
+      api: api.name,
+      code: 0,
+      status: "DECLINED",
+      message: data.message || data.status || "Declined",
+      time: duration
+    };
   } catch (err) {
-    if (err.name === "AbortError") return { code: -1, status: "timeout" };
-    return null;
+    const duration = Date.now() - startTime;
+    const isTimeout = err.name === "AbortError";
+    return {
+      api: api.name,
+      code: -1,
+      status: isTimeout ? "timeout" : "unavailable",
+      message: err.message || (isTimeout ? "Timeout" : "Unavailable"),
+      time: duration
+    };
   }
 }
 
-async function checkWithChkr(cardRaw) {
+function normalizeChkrResult(data) {
+  if (!data || typeof data !== "object") return null;
+  if (data.code !== undefined && data.code !== null) {
+    const numericCode = Number(data.code);
+    if (Number.isFinite(numericCode)) return { ...data, code: numericCode };
+  }
+
+  const status = String(data.status || "").trim();
+  if (/^(live|approved)$/i.test(status)) return { ...data, code: 1, status: "Live" };
+  if (/^(die|dead|declined|invalid)$/i.test(status)) return { ...data, code: 0, status: "Die" };
+  return { ...data, code: -1, status: status || "unavailable" };
+}
+
+async function checkWithChkr(api, cardRaw) {
+  const startTime = Date.now();
   try {
-    const res = await fetchWithTimeout(CHECK_APIS[1].url, {
+    const res = await fetchWithTimeout(api.url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ data: cardRaw })
     }, API_TIMEOUT_MS);
-    if (res.status === 429) return { code: -1, status: "rate_limited" };
+    const duration = Date.now() - startTime;
+    if (res.status === 429) {
+      return { api: api.name, code: -1, status: "rate_limited", message: "Limit exceeded", time: duration };
+    }
     if (!res.ok) throw new Error(`chkr ${res.status}`);
-    return await res.json();
+    const data = await res.json();
+    const normalized = normalizeChkrResult(data);
+    if (!normalized) throw new Error("Invalid response format");
+
+    return {
+      api: api.name,
+      code: normalized.code,
+      status: normalized.code === 1 ? "APPROVED" : (normalized.code === 0 ? "DECLINED" : normalized.status),
+      message: normalized.msg || normalized.message || normalized.status || (normalized.code === 1 ? "Live" : "Declined"),
+      time: duration,
+      card: normalized.code === 1 ? {
+        type: (normalized.brand || normalized.type || "").toLowerCase(),
+        category: (normalized.level || "").toLowerCase(),
+        bank: normalized.bank || "",
+        country: normalized.country || null
+      } : null
+    };
   } catch (err) {
-    if (err.name === "AbortError") return { code: -1, status: "timeout" };
-    return null;
+    const duration = Date.now() - startTime;
+    const isTimeout = err.name === "AbortError";
+    return {
+      api: api.name,
+      code: -1,
+      status: isTimeout ? "timeout" : "unavailable",
+      message: err.message || (isTimeout ? "Timeout" : "Unavailable"),
+      time: duration
+    };
   }
 }
 
 async function singleCheck(cardRaw) {
-  const api = getActiveAPI();
-  let result = api.name === "namso.live" ? await checkWithNamso(cardRaw) : await checkWithChkr(cardRaw);
+  const apis = CHECK_APIS;
 
-  if (result && result.code === -1) {
-    api.consecutive429++;
-    if (api.consecutive429 >= 2) api.disabledUntil = Date.now() + 60000;
-    const other = getActiveAPI();
-    if (other.name !== api.name) {
-      result = other.name === "namso.live" ? await checkWithNamso(cardRaw) : await checkWithChkr(cardRaw);
+  const checkPromises = apis.map(async (api) => {
+    const health = checkApiHealth.get(api.id);
+    const now = Date.now();
+    if (health && health.disabledUntil > now) {
+      return {
+        api: api.name,
+        code: -1,
+        status: "rate_limited",
+        message: "Ожидание лимита",
+        time: 0
+      };
+    }
+
+    const result = api.id === "namso"
+      ? await checkWithNamso(api, cardRaw)
+      : await checkWithChkr(api, cardRaw);
+
+    if (result && result.code !== -1) {
+      markCheckApiSuccess(api);
+    } else {
+      markCheckApiFailure(api, result || { code: -1, status: "unavailable" });
+    }
+    return result;
+  });
+
+  const results = await Promise.all(checkPromises);
+
+  // Определение общего кода по гибкой логике:
+  // Карта APPROVED (1) если хотя бы один одобрил и никто не отклонил.
+  // Карта DECLINED (0) если хотя бы один отклонил.
+  // Иначе (ошибки/таймауты) -1.
+  let overallCode = -1;
+  const codes = results.map(r => r.code);
+
+  if (codes.includes(0)) {
+    overallCode = 0; // Хотя бы один отклонил
+  } else if (codes.includes(1)) {
+    overallCode = 1; // Хотя бы один одобрил и никто не отклонил
+  }
+
+  // Сбор информации о банке/типе карты из успешных ответов
+  let combinedCardInfo = {};
+  for (const r of results) {
+    if (r.card) {
+      combinedCardInfo = {
+        ...combinedCardInfo,
+        ...r.card
+      };
     }
   }
 
-  if (result && result.code !== -1) api.consecutive429 = 0;
-  return result;
-}
+  // Формирование общего статуса и текстового сообщения
+  let overallStatus = "failed";
+  let overallMessage = "Declined";
 
-let currentCheckId = 0;
+  if (overallCode === 1) {
+    const allApproved = codes.every(c => c === 1);
+    overallStatus = allApproved ? "live" : "live_partial";
+    overallMessage = results.map(r => `${r.api}: ${r.message}`).join(" | ");
+  } else if (overallCode === 0) {
+    overallStatus = "failed";
+    overallMessage = results.map(r => `${r.api}: ${r.message}`).join(" | ");
+  } else {
+    overallStatus = "unavailable";
+    const statusSet = new Set(results.map(r => r.status));
+    if (statusSet.has("rate_limited")) {
+      overallStatus = "rate_limited";
+      overallMessage = "Лимит запросов";
+    } else if (statusSet.has("timeout")) {
+      overallStatus = "timeout";
+      overallMessage = "API таймаут";
+    } else {
+      overallMessage = "API недоступно";
+    }
+  }
+
+  return {
+    code: overallCode,
+    status: overallStatus,
+    message: overallMessage,
+    checks: results,
+    card: combinedCardInfo
+  };
+}
 
 async function generateCardInstant() {
   const card = await generateFullCard();
@@ -744,86 +908,215 @@ async function generateCardInstant() {
   };
 }
 
-async function backgroundCheck(checkId) {
-  for (let i = 0; i < 2; i++) {
-    if (checkId !== currentCheckId) return;
+function cardCheckId() {
+  return `check_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+}
 
-    const cached = await chrome.storage.local.get(CARD_CACHE_KEY);
-    const card = cached[CARD_CACHE_KEY];
-    if (!card) return;
-
-    await chrome.storage.local.set({
-      [CARD_CACHE_KEY]: { ...card, validationMessage: `Проверка ${i + 1}/2...` }
+async function scheduleCardCheckAlarm(delayMs = CARD_CHECK_LEASE_MS) {
+  try {
+    await chrome.alarms.clear(CARD_CHECK_ALARM_NAME);
+    await chrome.alarms.create(CARD_CHECK_ALARM_NAME, {
+      when: Date.now() + Math.max(250, delayMs)
     });
+  } catch (err) {
+    await addDevLog("warn", "Не удалось запланировать восстановление проверки карты", String(err?.message || err));
+  }
+}
 
-    const result = await singleCheck(card.raw);
-    if (checkId !== currentCheckId) return;
+async function clearCardCheckAlarm() {
+  try {
+    await chrome.alarms.clear(CARD_CHECK_ALARM_NAME);
+  } catch (_) {}
+}
 
-    if (!result || result.code === -1) {
-      const reason = result?.status === "rate_limited" ? "Лимит запросов"
-        : result?.status === "timeout" ? "API таймаут" : "API недоступно";
+async function clearCachedCard() {
+  await chrome.storage.local.remove([CARD_CACHE_KEY, CARD_TS_KEY, CARD_CHECK_JOB_KEY]);
+  await clearCardCheckAlarm();
+}
+
+async function getCardCheckJob() {
+  const data = await chrome.storage.local.get(CARD_CHECK_JOB_KEY);
+  return data[CARD_CHECK_JOB_KEY] || null;
+}
+
+async function finishCardCheck(jobId, card) {
+  const current = await getCardCheckJob();
+  if (!current || current.id !== jobId || current.card?.raw !== card.raw) return false;
+
+  const completedAt = Date.now();
+  await chrome.storage.local.set({
+    [CARD_CACHE_KEY]: card,
+    [CARD_TS_KEY]: completedAt,
+    [CARD_CHECK_JOB_KEY]: {
+      ...current,
+      state: "complete",
+      card,
+      leaseUntil: 0,
+      updatedAt: completedAt,
+      completedAt
+    }
+  });
+  await chrome.storage.local.remove(CARD_CHECK_JOB_KEY);
+  await clearCardCheckAlarm();
+  return true;
+}
+
+async function runCardCheckJob(expectedJobId = null) {
+  if (activeCardCheckJobId) {
+    if (!expectedJobId || activeCardCheckJobId !== expectedJobId) {
+      await scheduleCardCheckAlarm(1000);
+    }
+    return;
+  }
+
+  const initialJob = await getCardCheckJob();
+  if (!initialJob || (expectedJobId && initialJob.id !== expectedJobId)) return;
+  if (initialJob.state === "complete") {
+    await chrome.storage.local.remove(CARD_CHECK_JOB_KEY);
+    await clearCardCheckAlarm();
+    return;
+  }
+  activeCardCheckJobId = initialJob.id;
+
+  try {
+    while (true) {
+      const job = await getCardCheckJob();
+      if (!job || job.id !== activeCardCheckJobId) return;
+      if (job.state === "complete") {
+        await chrome.storage.local.remove(CARD_CHECK_JOB_KEY);
+        await clearCardCheckAlarm();
+        return;
+      }
+
+      const now = Date.now();
+      if (now - job.createdAt >= CARD_CHECK_STALE_MS) {
+        await finishCardCheck(job.id, {
+          ...job.card,
+          validated: false,
+          validationStatus: "unavailable",
+          validationMessage: "Проверка прервана — нажмите «Новая»"
+        });
+        return;
+      }
+
+      if (job.leaseUntil > now) {
+        await scheduleCardCheckAlarm(job.leaseUntil - now + 500);
+        return;
+      }
+
+      const runningJob = {
+        ...job,
+        state: "running",
+        leaseUntil: now + CARD_CHECK_LEASE_MS,
+        updatedAt: now
+      };
+      const checkingCard = {
+        ...job.card,
+        validationStatus: "checking",
+        validationMessage: `Проверка ${job.attempt + 1}...`
+      };
+      runningJob.card = checkingCard;
       await chrome.storage.local.set({
-        [CARD_CACHE_KEY]: {
-          ...card,
+        [CARD_CHECK_JOB_KEY]: runningJob,
+        [CARD_CACHE_KEY]: checkingCard,
+        [CARD_TS_KEY]: now
+      });
+      await scheduleCardCheckAlarm(CARD_CHECK_LEASE_MS + 1000);
+
+      const result = await singleCheck(checkingCard.raw);
+      const latest = await getCardCheckJob();
+      if (!latest || latest.id !== runningJob.id || latest.card?.raw !== checkingCard.raw) return;
+
+      if (!result || result.code === -1) {
+        const reason = result?.message || (result?.status === "rate_limited" ? "Лимит запросов"
+          : result?.status === "timeout" ? "API таймаут" : "API недоступно");
+        await finishCardCheck(latest.id, {
+          ...checkingCard,
           validated: false,
           validationStatus: result?.status === "rate_limited" ? "rate_limited" : "unavailable",
-          validationMessage: reason
-        },
-        [CARD_TS_KEY]: Date.now()
-      });
-      return;
-    }
+          validationMessage: reason,
+          checks: result?.checks || []
+        });
+        return;
+      }
 
-    if (result.code === 1) {
-      await chrome.storage.local.set({
-        [CARD_CACHE_KEY]: {
-          ...card,
-          type: result.card?.type || card.type,
+      if (result.code === 1) {
+        await finishCardCheck(latest.id, {
+          ...checkingCard,
+          type: result.card?.type || checkingCard.type,
           category: result.card?.category || "",
           bank: result.card?.bank || "",
           country: result.card?.country || null,
           validated: true,
-          validationStatus: "live",
-          validationMessage: result.message || "Approved"
-        },
-        [CARD_TS_KEY]: Date.now()
-      });
-      return;
-    }
+          validationStatus: result.status,
+          validationMessage: result.message || "Approved",
+          checks: result.checks || []
+        });
+        return;
+      }
 
-    const newCard = await generateFullCard();
-    await chrome.storage.local.set({
-      [CARD_CACHE_KEY]: {
-        ...newCard,
+      const nextAttempt = latest.attempt + 1;
+      const nextCard = {
+        ...await generateFullCard(),
         validated: false,
         validationStatus: "checking",
-        validationMessage: `Новая карта, проверка ${i + 2}/2...`
-      }
-    });
-    await sleep(500);
-  }
-
-  const final = await chrome.storage.local.get(CARD_CACHE_KEY);
-  const finalCard = final[CARD_CACHE_KEY];
-  if (finalCard && checkId === currentCheckId) {
-    await chrome.storage.local.set({
-      [CARD_CACHE_KEY]: {
-        ...finalCard,
-        validated: false,
-        validationStatus: "failed",
-        validationMessage: "Лун-валидна (Live не подтверждена)"
-      },
-      [CARD_TS_KEY]: Date.now()
-    });
+        validationMessage: `Новая карта, проверка ${nextAttempt + 1}...`
+      };
+      await chrome.storage.local.set({
+        [CARD_CHECK_JOB_KEY]: {
+          ...latest,
+          state: "pending",
+          attempt: nextAttempt,
+          card: nextCard,
+          leaseUntil: 0,
+          updatedAt: Date.now()
+        },
+        [CARD_CACHE_KEY]: nextCard,
+        [CARD_TS_KEY]: Date.now()
+      });
+      await scheduleCardCheckAlarm(1000);
+      await sleep(500);
+    }
+  } catch (err) {
+    await addDevLog("error", "Ошибка фоновой проверки карты", String(err?.message || err));
+    const job = await getCardCheckJob();
+    if (job?.id === activeCardCheckJobId) {
+      await chrome.storage.local.set({
+        [CARD_CHECK_JOB_KEY]: { ...job, leaseUntil: 0, updatedAt: Date.now() }
+      });
+      await scheduleCardCheckAlarm(1000);
+    }
+  } finally {
+    activeCardCheckJobId = null;
   }
 }
 
+async function resumeStoredCardCheck() {
+  const job = await getCardCheckJob();
+  if (job) await runCardCheckJob(job.id);
+}
+
 async function startCardCheck() {
-  currentCheckId++;
-  const checkId = currentCheckId;
   const card = await generateCardInstant();
-  await chrome.storage.local.set({ [CARD_CACHE_KEY]: card, [CARD_TS_KEY]: Date.now() });
-  backgroundCheck(checkId);
+  const now = Date.now();
+  const job = {
+    id: cardCheckId(),
+    state: "pending",
+    attempt: 0,
+    card,
+    createdAt: now,
+    updatedAt: now,
+    leaseUntil: 0
+  };
+  await chrome.storage.local.set({
+    [CARD_CACHE_KEY]: card,
+    [CARD_TS_KEY]: now,
+    [CARD_CHECK_JOB_KEY]: job
+  });
+  await scheduleCardCheckAlarm(CARD_CHECK_LEASE_MS + 1000);
+  runCardCheckJob(job.id).catch(err => {
+    addDevLog("error", "Не удалось запустить проверку карты", String(err?.message || err));
+  });
   return { started: true, checking: true, card };
 }
 
@@ -839,13 +1132,34 @@ async function recoverStaleCard(card) {
     validationMessage: "Проверка прервана — нажмите «Новая»"
   };
   await chrome.storage.local.set({ [CARD_CACHE_KEY]: recovered, [CARD_TS_KEY]: Date.now() });
+  await chrome.storage.local.remove(CARD_CHECK_JOB_KEY);
+  await clearCardCheckAlarm();
   return recovered;
 }
 
 async function getCachedCard() {
   const data = await chrome.storage.local.get(CARD_CACHE_KEY);
-  return recoverStaleCard(data[CARD_CACHE_KEY] || null);
+  const card = await recoverStaleCard(data[CARD_CACHE_KEY] || null);
+  if (card?.validationStatus === "checking") {
+    resumeStoredCardCheck().catch(() => {});
+  }
+  return card;
 }
+
+chrome.alarms.onAlarm.addListener(alarm => {
+  if (alarm.name !== CARD_CHECK_ALARM_NAME) return;
+  resumeStoredCardCheck().catch(err => {
+    addDevLog("error", "Не удалось восстановить проверку карты", String(err?.message || err));
+  });
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  resumeStoredCardCheck().catch(() => {});
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  resumeStoredCardCheck().catch(() => {});
+});
 
 async function getPopupBootstrap() {
   const [{ profiles, activeId }, country, currency, email, bin, settingsData, devLogsData] = await Promise.all([
@@ -1075,7 +1389,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action === "setBin") {
     const newBin = msg.bin?.replace(/\D/g, "") || DEFAULT_BIN;
     chrome.storage.local.set({ [BIN_STORAGE_KEY]: newBin }).then(() => {
-      chrome.storage.local.remove([CARD_CACHE_KEY, CARD_TS_KEY]).then(() => {
+      clearCachedCard().then(() => {
         sendResponse({ bin: newBin });
       });
     });
@@ -1083,9 +1397,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.action === "getCard" || msg.action === "getCardCache") {
-    chrome.storage.local.get(CARD_CACHE_KEY, (data) => {
-      sendResponse({ card: data[CARD_CACHE_KEY] || null });
-    });
+    getCachedCard().then(card => sendResponse({ card }));
     return true;
   }
 

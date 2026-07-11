@@ -310,6 +310,63 @@ function renderAddress(addr) {
   updateProfileSummary();
 }
 
+function renderCheckDetails(checks) {
+  const el = $("cardCheckDetails");
+  if (!el) return;
+  if (!checks || !Array.isArray(checks) || checks.length === 0) {
+    el.innerHTML = "";
+    el.hidden = true;
+    return;
+  }
+
+  el.innerHTML = "";
+  checks.forEach(c => {
+    const row = document.createElement("div");
+    row.className = "check-row";
+
+    let badgeClass = "badge-unknown";
+    let statusText = c.status || "UNKNOWN";
+    if (c.code === 1) {
+      badgeClass = "badge-live";
+      statusText = "APPROVED";
+    } else if (c.code === 0) {
+      badgeClass = "badge-die";
+      statusText = "DECLINED";
+    } else if (c.status === "rate_limited") {
+      badgeClass = "badge-unavailable";
+      statusText = "LIMIT";
+    } else if (c.status === "timeout") {
+      badgeClass = "badge-unavailable";
+      statusText = "TIMEOUT";
+    } else if (c.status === "unavailable") {
+      badgeClass = "badge-unavailable";
+      statusText = "ERROR";
+    }
+
+    const codeSpan = c.code !== undefined && c.code !== null && c.code !== -1
+      ? `<span class="check-meta-item">Код: <strong>${c.code}</strong></span>`
+      : "";
+
+    const timeSpan = c.time !== undefined && c.time !== null
+      ? `<span class="check-meta-item">Время: <strong>${c.time} мс</strong></span>`
+      : "";
+
+    row.innerHTML = `
+      <div class="check-header">
+        <span class="check-api">${c.api || "unknown"}</span>
+        <span class="badge ${badgeClass}">${statusText}</span>
+      </div>
+      <div class="check-meta">
+        ${codeSpan}
+        <span class="check-meta-item check-meta-msg" title="${c.message || ''}">Ответ: <strong>${c.message || '—'}</strong></span>
+        ${timeSpan}
+      </div>
+    `;
+    el.appendChild(row);
+  });
+  el.hidden = false;
+}
+
 function renderCard(card) {
   if (!$("cardStatusBadge")) return;
   lastCard = card;
@@ -318,6 +375,11 @@ function renderCard(card) {
     setCardStatus("❌", "badge-die", "Карта не получена", "#ef4444");
     updateCardPreview(null, lastAddress);
     updateProfileSummary();
+    const detailsEl = $("cardCheckDetails");
+    if (detailsEl) {
+      detailsEl.innerHTML = "";
+      detailsEl.hidden = true;
+    }
     return;
   }
 
@@ -332,7 +394,9 @@ function renderCard(card) {
 
   const vs = card.validationStatus;
   if (card.validated && vs === "live") {
-    setCardStatus("LIVE", "badge-live", card.validationMessage || "Approved", "#22c55e");
+    setCardStatus("API: APPROVED", "badge-live", "Approved (namso & chkr)", "#22c55e");
+  } else if (card.validated && vs === "live_partial") {
+    setCardStatus("APPROVED (LIMIT)", "badge-unknown", "Approved (namso), chkr limit", "#f59e0b");
   } else if (vs === "unavailable" || vs === "rate_limited" || vs === "timeout") {
     setCardStatus("API", "badge-unavailable", card.validationMessage || "API недоступен", "#a855f7");
   } else if (vs === "failed") {
@@ -342,6 +406,8 @@ function renderCard(card) {
   } else {
     setCardStatus("?", "badge-unknown", "Неизвестно", "#f59e0b");
   }
+
+  renderCheckDetails(card.checks);
 }
 
 function renderFillReport(result) {
@@ -771,7 +837,7 @@ async function initPopup() {
     return;
   }
 
-  safeSetText("versionTag", `v${boot.version || "2.3.0"}`);
+  safeSetText("versionTag", `v${boot.version || "2.3.1"}`);
   profiles = boot.profiles || [];
   activeProfileId = boot.activeId || profiles[0]?.id || "default";
   currentCountry = boot.country || "US";

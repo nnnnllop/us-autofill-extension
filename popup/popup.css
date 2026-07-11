@@ -1051,3 +1051,62 @@ body.compact-mode .main {
   transform: translateX(14px);
   background: var(--accent);
 }
+
+/* ── Check Details ── */
+.check-details {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin-top: 2px;
+}
+
+.check-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 5px 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
+.check-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.check-api {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.check-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 9px;
+  color: var(--text-muted);
+}
+
+.check-meta-item {
+  display: inline-flex;
+  align-items: center;
+}
+
+.check-meta-item strong {
+  color: var(--text);
+  margin-left: 2px;
+}
+
+.check-meta-msg {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
