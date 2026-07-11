@@ -758,7 +758,7 @@ async function fillInput(el, value, options = {}) {
 
 async function fillInputIfEmpty(el, value, options = {}) {
   if (!el || !value) return false;
-  if (el.value?.trim()) {
+  if (!options.force && el.value?.trim()) {
     el.setAttribute("data-us-autofilled", "true");
     return true;
   }
@@ -1025,7 +1025,7 @@ async function fillCardZip(address, report, opts = {}) {
   for (const input of queryAllInputsDeep()) {
     if (detectFieldFromInput(input) !== "cardZip") continue;
     found = true;
-    if (fieldAlreadyFilled(input)) {
+    if (fieldAlreadyFilled(input, opts)) {
       setReportStatus(report, "cardZip", "filled");
       return false;
     }
@@ -1232,7 +1232,7 @@ async function fillStripeBillingField(key, value, report, opts) {
     setReportStatus(report, key, "not_found");
     return false;
   }
-  if (fieldAlreadyFilled(el) && key !== "country") {
+  if (fieldAlreadyFilled(el, opts) && key !== "country") {
     setReportStatus(report, key, "filled");
     return true;
   }
@@ -1243,8 +1243,8 @@ async function fillStripeBillingField(key, value, report, opts) {
   return ok;
 }
 
-async function fillStripeBillingAddress(address, countryCode, report, currencyCode) {
-  const billingOpts = { stripe: false };
+async function fillStripeBillingAddress(address, countryCode, report, currencyCode, force = false) {
+  const billingOpts = { stripe: false, force };
   let filled = 0;
 
   await fillStripeCurrency(currencyCode, report);
@@ -1439,7 +1439,7 @@ async function fillKnownStripeFields(address, card, mode, report, billingOpts) {
         }
       }
       if (!el) continue;
-      if (fieldAlreadyFilled(el)) continue;
+      if (fieldAlreadyFilled(el, billingOpts)) continue;
       let ok = false;
       if (key === "email") ok = await fillInputIfEmpty(el, value, billingOpts);
       else ok = await fillInput(el, value, billingOpts);
@@ -1467,7 +1467,7 @@ async function fillKnownStripeFields(address, card, mode, report, billingOpts) {
       if (!value) continue;
       for (const input of queryAllInputsDeep()) {
         if (detectFieldFromInput(input) !== key) continue;
-        if (fieldAlreadyFilled(input)) continue;
+        if (fieldAlreadyFilled(input, { stripe, scroll: false, ...billingOpts })) continue;
         if (await fillInput(input, value, { stripe, scroll: false })) {
           filled++;
           setReportStatus(report, key, "filled");
@@ -1562,7 +1562,7 @@ function detectFieldFromInput(input) {
   return null;
 }
 
-async function fillIframeFields(address, card, mode, report, currencyCode) {
+async function fillIframeFields(address, card, mode, report, currencyCode, force = false) {
   const fillAddress = mode === "all" || mode === "address";
   const fillCard = mode === "all" || mode === "card";
   const inStripeFrame = isStripeIframe() || /stripe/i.test(location.hostname);
@@ -1570,7 +1570,7 @@ async function fillIframeFields(address, card, mode, report, currencyCode) {
   let stripeFieldsDone = false;
   const countryCode = address?.country || "US";
   const currency = currencyCode || "USD";
-  const billingOpts = { stripe: false, scroll: false };
+  const billingOpts = { stripe: false, scroll: false, force };
 
   if (inStripeFrame && !stripePrepDone) {
     if (!stripeCurrencyDone) {
@@ -1585,7 +1585,7 @@ async function fillIframeFields(address, card, mode, report, currencyCode) {
     const emailEl = document.querySelector(
       'input[type="email"], input[name="email"], input[autocomplete="email"], #email'
     );
-    if (emailEl && !fieldAlreadyFilled(emailEl)) {
+    if (emailEl && !fieldAlreadyFilled(emailEl, { force })) {
       const ok = await fillInputIfEmpty(emailEl, address.email, billingOpts);
       if (ok) {
         filled++;
@@ -1653,7 +1653,7 @@ async function fillIframeFields(address, card, mode, report, currencyCode) {
   };
 
   for (const input of inputs) {
-    if (fieldAlreadyFilled(input)) continue;
+    if (fieldAlreadyFilled(input, { force })) continue;
     const key = detectFieldFromInput(input);
     if (!key) continue;
     if (!fillAddress && ADDRESS_KEYS.includes(key)) continue;
@@ -1708,9 +1708,9 @@ function broadcastFill(payload) {
   }
 }
 
-async function coordinatedIframeFill(address, card, mode, currencyCode) {
+async function coordinatedIframeFill(address, card, mode, currencyCode, force) {
   if (!IS_TOP_FRAME) return;
-  const payload = { address, card, mode, currency: currencyCode || "USD" };
+  const payload = { address, card, mode, currency: currencyCode || "USD", force };
   broadcastFill(payload);
   const delays = fastFillMode ? [450] : IFRAME_RETRY_DELAYS;
   for (const delay of delays) {
@@ -1787,7 +1787,7 @@ async function tryFillField(key, value, report, options) {
     setReportStatus(report, key, "not_found");
     return false;
   }
-  if (fieldAlreadyFilled(el)) {
+  if (fieldAlreadyFilled(el, options)) {
     setReportStatus(report, key, "filled");
     return true;
   }
@@ -1800,9 +1800,10 @@ async function tryFillField(key, value, report, options) {
 
 async function autoFill(address, card, mode = "all", options = {}) {
   const currencyCode = options.currency || "USD";
+  const force = !!options.force;
   if (!IS_TOP_FRAME && (isStripeIframe() || location.hostname.includes("stripe"))) {
     const report = createReport(mode);
-    const n = await fillIframeFields(address, card, mode, report, currencyCode);
+    const n = await fillIframeFields(address, card, mode, report, currencyCode, force);
     return buildResult(n, report, detectPlatform(), mode);
   }
 
@@ -1810,7 +1811,7 @@ async function autoFill(address, card, mode = "all", options = {}) {
   const fillAddress = mode === "all" || mode === "address";
   const fillCard = mode === "all" || mode === "card";
   const stripeInput = usesStripeInput(platform);
-  const opts = stripeInput ? { stripe: true } : {};
+  const opts = { stripe: stripeInput, force };
   const report = createReport(mode);
 
   if (fillAddress && !address && fillCard && !card?.number) {
@@ -1823,7 +1824,7 @@ async function autoFill(address, card, mode = "all", options = {}) {
   if (fillAddress && address) {
     if (platform === "stripe") {
       if (!hasEmbeddedStripeCheckout()) {
-        filled += await fillStripeBillingAddress(address, countryCode, report, currencyCode);
+        filled += await fillStripeBillingAddress(address, countryCode, report, currencyCode, force);
       }
     } else {
       await prepareCheckout(platform);
@@ -1899,7 +1900,7 @@ async function autoFill(address, card, mode = "all", options = {}) {
       broadcastFill({ address, card, mode, currency: currencyCode });
     } else {
       if (platform === "stripe") await waitForStripeFrames(1500);
-      await coordinatedIframeFill(address, card, mode, currencyCode);
+      await coordinatedIframeFill(address, card, mode, currencyCode, force);
     }
   }
 
@@ -2021,7 +2022,7 @@ async function executeFillWithRetries(mode, fillData = null) {
 
       let result;
       try {
-        result = await autoFill(data.address, data.card, mode, { currency: data.currency });
+        result = await autoFill(data.address, data.card, mode, { currency: data.currency, force: !!fillData });
       } catch (err) {
         warn("autoFill error:", err);
         result = buildResult(0, createReport(mode), detectPlatform(), mode);
@@ -2129,8 +2130,8 @@ function initContentScript() {
     if (event.data?.source !== MSG_SOURCE || event.data?.action !== "fill") return;
     if (IS_TOP_FRAME) return;
     try {
-      const { address, card, mode, currency } = event.data;
-      await fillIframeFields(address, card, mode || "all", null, currency);
+      const { address, card, mode, currency, force } = event.data;
+      await fillIframeFields(address, card, mode || "all", null, currency, force);
     } catch (err) {
       warn("iframe message fill:", err);
     }

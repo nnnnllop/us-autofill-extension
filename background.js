@@ -27,7 +27,7 @@ const ONBOARDING_DONE_KEY = "onboardingDone";
 const DEV_LOGS_KEY = "devLogs";
 const MAX_PROFILES = 50;
 const MAX_DEV_LOGS = 500;
-const EXT_VERSION = "2.4.1";
+const EXT_VERSION = "2.4.2";
 
 const DEFAULT_BIN = "5154620022";
 const BIN_STORAGE_KEY = "user_bin";
