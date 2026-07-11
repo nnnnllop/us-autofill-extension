@@ -27,7 +27,7 @@ const ONBOARDING_DONE_KEY = "onboardingDone";
 const DEV_LOGS_KEY = "devLogs";
 const MAX_PROFILES = 50;
 const MAX_DEV_LOGS = 500;
-const EXT_VERSION = "2.4.0";
+const EXT_VERSION = "2.4.1";
 
 const DEFAULT_BIN = "5154620022";
 const BIN_STORAGE_KEY = "user_bin";
@@ -658,7 +658,7 @@ const CHECK_APIS = Object.freeze([
   { id: "namso", name: "namso.live", url: "https://namso.live/api/v1/check.php" },
   { id: "chkr", name: "chkr.cc", url: "https://api.chkr.cc/" }
 ]);
-const CARD_CHECK_MAX_ATTEMPTS = 2;
+const CARD_CHECK_MAX_ATTEMPTS = 5;
 const CARD_CHECK_LEASE_MS = API_TIMEOUT_MS * CHECK_APIS.length + 5000;
 const API_COOLDOWN_MS = 60000;
 
@@ -666,6 +666,27 @@ const checkApiHealth = new Map(CHECK_APIS.map(api => [api.id, {
   consecutiveFailures: 0,
   disabledUntil: 0
 }]));
+
+// Восстановление здоровья API из хранилища
+chrome.storage.local.get(["api_health_data"], data => {
+  if (data.api_health_data) {
+    for (const [id, val] of Object.entries(data.api_health_data)) {
+      if (checkApiHealth.has(id)) {
+        const h = checkApiHealth.get(id);
+        h.consecutiveFailures = Number(val.consecutiveFailures) || 0;
+        h.disabledUntil = Number(val.disabledUntil) || 0;
+      }
+    }
+  }
+});
+
+async function saveApiHealthToStorage() {
+  const data = {};
+  for (const [id, val] of checkApiHealth.entries()) {
+    data[id] = val;
+  }
+  await chrome.storage.local.set({ "api_health_data": data });
+}
 
 let activeCardCheckJobId = null;
 
@@ -694,6 +715,7 @@ function markCheckApiSuccess(api) {
   const health = checkApiHealth.get(api.id);
   health.consecutiveFailures = 0;
   health.disabledUntil = 0;
+  saveApiHealthToStorage().catch(() => {});
 }
 
 function markCheckApiFailure(api, result) {
@@ -702,6 +724,7 @@ function markCheckApiFailure(api, result) {
   if (result?.status === "rate_limited" || health.consecutiveFailures >= 2) {
     health.disabledUntil = Date.now() + API_COOLDOWN_MS;
   }
+  saveApiHealthToStorage().catch(() => {});
 }
 
 async function checkWithNamso(api, cardRaw) {
@@ -714,17 +737,44 @@ async function checkWithNamso(api, cardRaw) {
       body: JSON.stringify({ cc, mes, ano, cvv })
     }, API_TIMEOUT_MS);
     const duration = Date.now() - startTime;
-    if (res.status === 429) {
-      return { api: api.name, code: -1, status: "rate_limited", message: "Limit exceeded", time: duration };
+
+    const text = await res.text();
+    let data = null;
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch (_) {
+      data = {};
     }
-    if (!res.ok) throw new Error(`namso ${res.status}`);
-    const data = await res.json();
-    if (data.status === "APPROVED" || data.code === "85") {
+
+    const apiStatus = String(data?.status || "").trim();
+    const apiMessage = String(data?.message || data?.msg || "").trim();
+    const apiCode = String(data?.code || "").trim();
+
+    const isLimited =
+      res.status === 429 ||
+      /^limit(?:ed)?$/i.test(apiStatus) ||
+      /limit exceeded|rate.?limit/i.test(apiMessage);
+
+    if (isLimited) {
+      return {
+        api: api.name,
+        code: -1,
+        status: "rate_limited",
+        message: apiMessage || "Limit exceeded",
+        time: duration
+      };
+    }
+
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+
+    if (apiStatus === "APPROVED" || apiCode === "85") {
       return {
         api: api.name,
         code: 1,
         status: "APPROVED",
-        message: data.message || "Approved",
+        message: apiMessage || "Approved",
         time: duration,
         card: {
           type: (data.card_info?.brand || "").toLowerCase(),
@@ -734,11 +784,22 @@ async function checkWithNamso(api, cardRaw) {
         }
       };
     }
+
+    if (apiStatus === "DECLINED" || apiStatus === "Die" || apiStatus === "Die!" || apiStatus === "FAIL") {
+      return {
+        api: api.name,
+        code: 0,
+        status: "DECLINED",
+        message: apiMessage || "Declined",
+        time: duration
+      };
+    }
+
     return {
       api: api.name,
       code: 0,
       status: "DECLINED",
-      message: data.message || data.status || "Declined",
+      message: apiMessage || "Declined",
       time: duration
     };
   } catch (err) {
@@ -776,26 +837,70 @@ async function checkWithChkr(api, cardRaw) {
       body: JSON.stringify({ data: cardRaw })
     }, API_TIMEOUT_MS);
     const duration = Date.now() - startTime;
-    if (res.status === 429) {
-      return { api: api.name, code: -1, status: "rate_limited", message: "Limit exceeded", time: duration };
+
+    const text = await res.text();
+    let data = null;
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch (_) {
+      data = {};
     }
-    if (!res.ok) throw new Error(`chkr ${res.status}`);
-    const data = await res.json();
-    const normalized = normalizeChkrResult(data);
-    if (!normalized) throw new Error("Invalid response format");
+
+    const apiStatus = String(data?.status || "").trim();
+    const apiMessage = String(data?.message || data?.msg || "").trim();
+    const apiCode = data?.code !== undefined && data?.code !== null ? Number(data.code) : -1;
+
+    const isLimited =
+      res.status === 429 ||
+      /^limit(?:ed)?$/i.test(apiStatus) ||
+      /limit exceeded|rate.?limit/i.test(apiMessage);
+
+    if (isLimited) {
+      return {
+        api: api.name,
+        code: -1,
+        status: "rate_limited",
+        message: apiMessage || "Limit exceeded",
+        time: duration
+      };
+    }
+
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+
+    if (apiCode === 1 || /^(live|approved)$/i.test(apiStatus)) {
+      return {
+        api: api.name,
+        code: 1,
+        status: "APPROVED",
+        message: apiMessage || "Approved",
+        time: duration,
+        card: data.card ? {
+          type: (data.card.type || "").toLowerCase(),
+          category: (data.card.category || "").toLowerCase(),
+          bank: data.card.bank || "",
+          country: data.card.country?.name || null
+        } : null
+      };
+    }
+
+    if (apiCode === 0 || /^(die|dead|declined|invalid)$/i.test(apiStatus)) {
+      return {
+        api: api.name,
+        code: 0,
+        status: "DECLINED",
+        message: apiMessage || "Declined",
+        time: duration
+      };
+    }
 
     return {
       api: api.name,
-      code: normalized.code,
-      status: normalized.code === 1 ? "APPROVED" : (normalized.code === 0 ? "DECLINED" : normalized.status),
-      message: normalized.msg || normalized.message || normalized.status || (normalized.code === 1 ? "Live" : "Declined"),
-      time: duration,
-      card: normalized.code === 1 ? {
-        type: (normalized.brand || normalized.type || "").toLowerCase(),
-        category: (normalized.level || "").toLowerCase(),
-        bank: normalized.bank || "",
-        country: normalized.country || null
-      } : null
+      code: -1,
+      status: "unavailable",
+      message: apiMessage || "Unknown response",
+      time: duration
     };
   } catch (err) {
     const duration = Date.now() - startTime;
@@ -1013,7 +1118,7 @@ async function runCardCheckJob(expectedJobId = null) {
       const checkingCard = {
         ...job.card,
         validationStatus: "checking",
-        validationMessage: `Проверка ${job.attempt + 1}...`
+        validationMessage: `Проверка ${job.attempt + 1}/${CARD_CHECK_MAX_ATTEMPTS}...`
       };
       runningJob.card = checkingCard;
       await chrome.storage.local.set({
@@ -1056,11 +1161,22 @@ async function runCardCheckJob(expectedJobId = null) {
       }
 
       const nextAttempt = latest.attempt + 1;
+      if (nextAttempt >= CARD_CHECK_MAX_ATTEMPTS) {
+        await finishCardCheck(latest.id, {
+          ...checkingCard,
+          validated: false,
+          validationStatus: "failed",
+          validationMessage: "Лун-валидна (Live не подтверждена)",
+          checks: result.checks || []
+        });
+        return;
+      }
+
       const nextCard = {
         ...await generateFullCard(),
         validated: false,
         validationStatus: "checking",
-        validationMessage: `Новая карта, проверка ${nextAttempt + 1}...`
+        validationMessage: `Новая карта, проверка ${nextAttempt + 1}/${CARD_CHECK_MAX_ATTEMPTS}...`
       };
       await chrome.storage.local.set({
         [CARD_CHECK_JOB_KEY]: {
@@ -1075,7 +1191,7 @@ async function runCardCheckJob(expectedJobId = null) {
         [CARD_TS_KEY]: Date.now()
       });
       await scheduleCardCheckAlarm(1000);
-      await sleep(500);
+      await sleep(2000);
     }
   } catch (err) {
     await addDevLog("error", "Ошибка фоновой проверки карты", String(err?.message || err));

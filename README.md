@@ -4,7 +4,7 @@
 
 Поддерживаются **Stripe**, **Shopify**, **Paddle**, **Lemon Squeezy** и обычные HTML-формы.
 
-![Версия](https://img.shields.io/badge/версия-2.4.0-green)
+![Версия](https://img.shields.io/badge/версия-2.4.1-green)
 ![Manifest](https://img.shields.io/badge/Manifest-V3-blue)
 ![Лицензия](https://img.shields.io/badge/лицензия-GPL--3.0--or--later-lightgrey)
 
@@ -140,6 +140,13 @@ us-autofill-extension/
 ---
 
 ## Changelog
+
+### 2.4.1
+
+- Ограничено количество попыток поиска карт до 5 за сессию для предотвращения блокировок со стороны API.
+- Добавлена задержка в 2 секунды между попытками проверки карт для более плавного расхода лимитов API.
+- Данные о здоровье API (cooldown) теперь сохраняются в `chrome.storage.local` и сохраняются при перезапуске Manifest V3 Service Worker.
+- Улучшен парсинг ответов API для надежного разделения прикладных серверных лимитов и ошибок.
 
 ### 2.4.0
 
