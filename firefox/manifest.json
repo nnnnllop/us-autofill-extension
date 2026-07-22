@@ -1,12 +1,12 @@
 {
   "manifest_version": 3,
   "name": "AutoFill",
-  "version": "2.4.2",
-  "description": "Автозаполнение адреса и карты — Stripe, Shopify, Paddle, Lemon Squeezy",
+  "version": "2.5.0",
+  "description": "Автозаполнение адреса, карты и IBAN — Stripe, Shopify, Paddle, Lemon Squeezy",
   "permissions": ["storage", "activeTab", "scripting", "alarms"],
   "host_permissions": ["<all_urls>"],
   "background": {
-    "service_worker": "background.js"
+    "scripts": ["background.js"]
   },
   "content_scripts": [
     {
@@ -40,5 +40,11 @@
     "32": "icons/icon32.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "autofill@nnnnllop.github",
+      "strict_min_version": "109.0"
+    }
   }
 }

@@ -32,7 +32,7 @@
           </div>
           <div class="brand-text">
             <h1>AutoFill</h1>
-            <span class="brand-tag" id="versionTag">v2.4.2</span>
+            <span class="brand-tag" id="versionTag">v2.5.0</span>
           </div>
         </div>
         <div class="status-pill" id="status">
@@ -219,6 +219,45 @@
         </section>
       </div>
 
+      <section class="panel panel--iban">
+        <div class="panel-head panel-head--between">
+          <div class="panel-head-left">
+            <span class="panel-icon">🏦</span>
+            <span class="panel-title">IBAN</span>
+          </div>
+          <div class="panel-actions">
+            <button id="btnCopyIban" class="btn-icon btn-icon--sm" title="Копировать IBAN">
+              <svg viewBox="0 0 24 24" fill="none"><rect x="8" y="8" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.6"/><path d="M6 16H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" stroke="currentColor" stroke-width="1.6"/></svg>
+            </button>
+            <button id="btnRefreshIban" class="btn-refresh-sm btn-refresh-sm--teal" title="Новый IBAN">
+              <svg viewBox="0 0 24 24" fill="none"><path d="M4 12a8 8 0 0 1 13.5-5.7M20 7v4h-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M20 12a8 8 0 0 1-13.5 5.7M4 17v-4h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span>Новый</span>
+            </button>
+          </div>
+        </div>
+        <div class="iban-row">
+          <label for="ibanCountrySelect" class="inline-label">Страна IBAN</label>
+          <div class="select-wrap select-wrap--grow">
+            <select id="ibanCountrySelect" class="select-field select-field--compact" title="Страна для генерации IBAN"></select>
+            <span class="select-chevron" aria-hidden="true">▾</span>
+          </div>
+        </div>
+        <div class="data-grid data-grid--2" id="ibanCard">
+          <div class="data-item data-item--wide data-item--copy" data-copy="ibanValue" data-copy-raw="ibanRaw">
+            <span class="data-label">IBAN</span>
+            <span class="data-value mono" id="ibanValue">—</span>
+          </div>
+          <div class="data-item data-item--copy" data-copy="ibanCountry">
+            <span class="data-label">Страна</span>
+            <span class="data-value" id="ibanCountry">—</span>
+          </div>
+          <div class="data-item data-item--copy" data-copy="ibanValid">
+            <span class="data-label">MOD-97</span>
+            <span class="data-value" id="ibanValid">—</span>
+          </div>
+        </div>
+      </section>
+
       <section class="panel panel--actions">
         <div class="actions-bar">
           <div class="actions-fill">
@@ -227,9 +266,10 @@
               <button id="btnFillAll" class="fill-btn fill-btn--all">Всё</button>
               <button id="btnFillAddress" class="fill-btn fill-btn--address">Адрес</button>
               <button id="btnFillCard" class="fill-btn fill-btn--card">Карта</button>
+              <button id="btnFillIban" class="fill-btn fill-btn--iban">IBAN</button>
             </div>
           </div>
-          <button id="btnRefreshAll" class="btn-refresh-all" title="Обновить адрес и карту">
+          <button id="btnRefreshAll" class="btn-refresh-all" title="Обновить адрес, карту и IBAN">
             <svg viewBox="0 0 24 24" fill="none"><path d="M4 12a8 8 0 0 1 13.5-5.7M20 7v4h-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M20 12a8 8 0 0 1-13.5 5.7M4 17v-4h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
             <span>Обновить всё</span>
           </button>
@@ -260,6 +300,7 @@
             <option value="all">Всё</option>
             <option value="address">Имя + адрес</option>
             <option value="card">Только карта</option>
+            <option value="iban">Только IBAN</option>
           </select>
           <span class="select-chevron" aria-hidden="true">▾</span>
         </div>

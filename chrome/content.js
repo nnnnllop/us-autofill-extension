@@ -33,11 +33,13 @@ const FIELD_LABELS = {
   currency: "Валюта",
   cardNumber: "Номер карты",
   cardExpiry: "Срок",
-  cardCVV: "CVV"
+  cardCVV: "CVV",
+  iban: "IBAN"
 };
 
 const ADDRESS_KEYS = ["email", "firstName", "lastName", "fullName", "address1", "address2", "city", "state", "zip", "country"];
 const CARD_KEYS = ["currency", "fullName", "cardNumber", "cardExpiry", "cardCVV", "cardCountry", "cardZip"];
+const IBAN_KEYS = ["iban"];
 
 const COUNTRY_PATTERNS = {
   US: { values: ["US", "USA", "840"], patterns: [/^US$/i, /^USA$/i, /^United States/i, /^США/i] },
@@ -191,6 +193,16 @@ const FIELD_MAP = {
       'input[name="verification_value"]', 'input[id="card-cvc"]'
     ],
     keywords: ["cvc", "cvv", "security code"]
+  },
+  iban: {
+    selectors: [
+      'input[name*="iban" i]', 'input[id*="iban" i]',
+      'input[autocomplete="iban"]', 'input[data-testid*="iban" i]',
+      'input[placeholder*="iban" i]', 'textarea[name*="iban" i]',
+      'input[name*="bankaccount" i]', 'input[name*="bank_account" i]',
+      'input[name*="accountnumber" i][maxlength="34"]'
+    ],
+    keywords: ["iban", "international bank", "bank account number", "номер счёта iban"]
   }
 };
 
@@ -668,7 +680,8 @@ function findField(key) {
 function keysForMode(mode) {
   if (mode === "address") return ADDRESS_KEYS;
   if (mode === "card") return CARD_KEYS;
-  return [...ADDRESS_KEYS, ...CARD_KEYS.filter(k => !ADDRESS_KEYS.includes(k))];
+  if (mode === "iban") return IBAN_KEYS;
+  return [...ADDRESS_KEYS, ...CARD_KEYS.filter(k => !ADDRESS_KEYS.includes(k)), ...IBAN_KEYS];
 }
 
 function detectPresentFields(mode) {
@@ -1562,9 +1575,10 @@ function detectFieldFromInput(input) {
   return null;
 }
 
-async function fillIframeFields(address, card, mode, report, currencyCode, force = false) {
+async function fillIframeFields(address, card, mode, report, currencyCode, force = false, iban = null) {
   const fillAddress = mode === "all" || mode === "address";
   const fillCard = mode === "all" || mode === "card";
+  const fillIbanMode = mode === "all" || mode === "iban";
   const inStripeFrame = isStripeIframe() || /stripe/i.test(location.hostname);
   let filled = 0;
   let stripeFieldsDone = false;
@@ -1636,6 +1650,7 @@ async function fillIframeFields(address, card, mode, report, currencyCode, force
   const inputs = inStripeFrame
     ? queryAllInputsDeep()
     : [...document.querySelectorAll('input:not([type="hidden"]), select, textarea')];
+  const ibanValue = iban?.iban || iban?.formatted || null;
   const values = {
     email: address?.email,
     firstName: address?.firstName,
@@ -1649,7 +1664,8 @@ async function fillIframeFields(address, card, mode, report, currencyCode, force
     cardZip: address?.zip,
     cardNumber: card?.number,
     cardExpiry: card?.formattedExpiry,
-    cardCVV: card?.cvv
+    cardCVV: card?.cvv,
+    iban: ibanValue
   };
 
   for (const input of inputs) {
@@ -1658,6 +1674,7 @@ async function fillIframeFields(address, card, mode, report, currencyCode, force
     if (!key) continue;
     if (!fillAddress && ADDRESS_KEYS.includes(key)) continue;
     if (!fillCard && CARD_KEYS.includes(key)) continue;
+    if (!fillIbanMode && IBAN_KEYS.includes(key)) continue;
     if (key === "email" || key === "country" || key === "cardCountry") continue;
     const value = values[key];
     if (!value && key !== "address2") continue;
@@ -1708,9 +1725,9 @@ function broadcastFill(payload) {
   }
 }
 
-async function coordinatedIframeFill(address, card, mode, currencyCode, force) {
+async function coordinatedIframeFill(address, card, mode, currencyCode, force, iban = null) {
   if (!IS_TOP_FRAME) return;
-  const payload = { address, card, mode, currency: currencyCode || "USD", force };
+  const payload = { address, card, iban, mode, currency: currencyCode || "USD", force };
   broadcastFill(payload);
   const delays = fastFillMode ? [450] : IFRAME_RETRY_DELAYS;
   for (const delay of delays) {
@@ -1801,20 +1818,22 @@ async function tryFillField(key, value, report, options) {
 async function autoFill(address, card, mode = "all", options = {}) {
   const currencyCode = options.currency || "USD";
   const force = !!options.force;
+  const iban = options.iban || null;
   if (!IS_TOP_FRAME && (isStripeIframe() || location.hostname.includes("stripe"))) {
     const report = createReport(mode);
-    const n = await fillIframeFields(address, card, mode, report, currencyCode, force);
+    const n = await fillIframeFields(address, card, mode, report, currencyCode, force, iban);
     return buildResult(n, report, detectPlatform(), mode);
   }
 
   const platform = detectPlatform();
   const fillAddress = mode === "all" || mode === "address";
   const fillCard = mode === "all" || mode === "card";
+  const fillIban = mode === "all" || mode === "iban";
   const stripeInput = usesStripeInput(platform);
   const opts = { stripe: stripeInput, force };
   const report = createReport(mode);
 
-  if (fillAddress && !address && fillCard && !card?.number) {
+  if (fillAddress && !address && fillCard && !card?.number && !(fillIban && iban?.iban)) {
     return buildResult(0, report, platform, mode);
   }
 
@@ -1893,14 +1912,21 @@ async function autoFill(address, card, mode = "all", options = {}) {
     CARD_KEYS.forEach(k => setReportStatus(report, k, "skipped"));
   }
 
+  if (fillIban && iban?.iban) {
+    if (await tryFillField("iban", iban.iban, report, opts)) filled++;
+    log(`IBAN: ${iban.formatted || iban.iban}`);
+  } else if (fillIban) {
+    IBAN_KEYS.forEach(k => setReportStatus(report, k, "skipped"));
+  }
+
   if (IS_TOP_FRAME &&
       (platform === "stripe" || platform === "paddle" || platform === "lemon") &&
       ((fillCard && card?.number) || (fillAddress && address && hasEmbeddedStripeCheckout()))) {
     if (fastFillMode) {
-      broadcastFill({ address, card, mode, currency: currencyCode });
+      broadcastFill({ address, card, iban, mode, currency: currencyCode });
     } else {
       if (platform === "stripe") await waitForStripeFrames(1500);
-      await coordinatedIframeFill(address, card, mode, currencyCode, force);
+      await coordinatedIframeFill(address, card, mode, currencyCode, force, iban);
     }
   }
 
@@ -2003,10 +2029,11 @@ async function executeFillWithRetries(mode, fillData = null) {
         stripePrepDone = false;
         stripeCurrencyDone = false;
         await waitForStripeFrames(i === 0 ? 1200 : 600);
-        if (data.address || data.card) {
+        if (data.address || data.card || data.iban) {
           broadcastFill({
             address: data.address,
             card: data.card,
+            iban: data.iban || null,
             mode,
             currency: data.currency || "USD"
           });
@@ -2022,7 +2049,11 @@ async function executeFillWithRetries(mode, fillData = null) {
 
       let result;
       try {
-        result = await autoFill(data.address, data.card, mode, { currency: data.currency, force: !!fillData });
+        result = await autoFill(data.address, data.card, mode, {
+          currency: data.currency,
+          force: !!fillData,
+          iban: data.iban || null
+        });
       } catch (err) {
         warn("autoFill error:", err);
         result = buildResult(0, createReport(mode), detectPlatform(), mode);
@@ -2120,7 +2151,7 @@ function initContentScript() {
       }
     }
     if (area === "local" && changes.autoFillMode) {
-      autoFillMode = ["all", "address", "card"].includes(changes.autoFillMode.newValue)
+      autoFillMode = ["all", "address", "card", "iban"].includes(changes.autoFillMode.newValue)
         ? changes.autoFillMode.newValue
         : "all";
     }
@@ -2130,8 +2161,8 @@ function initContentScript() {
     if (event.data?.source !== MSG_SOURCE || event.data?.action !== "fill") return;
     if (IS_TOP_FRAME) return;
     try {
-      const { address, card, mode, currency, force } = event.data;
-      await fillIframeFields(address, card, mode || "all", null, currency, force);
+      const { address, card, iban, mode, currency, force } = event.data;
+      await fillIframeFields(address, card, mode || "all", null, currency, force, iban || null);
     } catch (err) {
       warn("iframe message fill:", err);
     }

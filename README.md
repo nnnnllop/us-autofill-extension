@@ -1,11 +1,12 @@
 # AutoFill
 
-Расширение для Chrome: автозаполнение billing-адреса и тестовых карт на страницах оплаты.
+Расширение для **Chrome** (и Chromium: Edge, Brave, Opera) и **Firefox**: автозаполнение billing-адреса, тестовых карт и IBAN на страницах оплаты.
 
 Поддерживаются **Stripe**, **Shopify**, **Paddle**, **Lemon Squeezy** и обычные HTML-формы.
 
-![Версия](https://img.shields.io/badge/версия-2.4.2-green)
+![Версия](https://img.shields.io/badge/версия-2.5.0-green)
 ![Manifest](https://img.shields.io/badge/Manifest-V3-blue)
+![Браузеры](https://img.shields.io/badge/Chrome%20%7C%20Firefox-supported-informational)
 ![Лицензия](https://img.shields.io/badge/лицензия-GPL--3.0--or--later-lightgrey)
 
 ---
@@ -15,12 +16,13 @@
 - **Адрес и имя** — 10 стран (US, GB, DE, FR, CA, AU, NL, IT, ES, PL), публичные адреса + имена через [randomuser.me](https://randomuser.me)
 - **Генерация карт** — алгоритм Луна, настраиваемый BIN, пресеты MC / Visa / Amex
 - **Проверка карт** — всегда запускается через публичные API (namso.live, chkr.cc) после создания новой карты
+- **Генерация IBAN** — валидные IBAN (MOD-97) для DE, FR, NL, IT, ES, PL, GB, AT, BE, CH, SE; отдельный режим заполнения
 - **Профили** — до 50 наборов (страна, BIN, email), экспорт/импорт JSON
 - **Закрепление адреса** — улица и город не меняются, обновляется только имя
 - **Stripe Checkout** — кнопка **Заполнить** на странице, пошаговый retry, заполнение iframe
 - **Редкие поля карты** — `Cardholder name`, `Country or region` и `ZIP` в payment-блоке заполняются из текущего профиля/адреса
 - **Отчёт заполнения** — какие поля заполнены (✓), пропущены (·), в iframe (↗)
-- **Горячая клавиша** — `Ctrl+Shift+Z` (настраивается в Chrome)
+- **Горячая клавиша** — `Ctrl+Shift+Z` (настраивается в браузере)
 - **Shadow DOM** — поиск полей внутри shadow root
 - **Автозаполнение** — по умолчанию выключено; при включении показывается предупреждение, что функция ещё дорабатывается
 - **Dev-логи** — можно включить, скачать, скопировать и очистить прямо в popup
@@ -29,23 +31,41 @@
 
 ## Установка
 
-### Из исходников (режим разработчика)
+Репозиторий разделён на готовые пакеты:
 
-1. Скачайте или клонируйте репозиторий:
+| Папка | Браузер |
+|-------|---------|
+| **`chrome/`** | Chrome, Edge, Brave, Opera |
+| **`firefox/`** | Firefox |
+
+Общий код лежит в `src/`. После правок в `src/` выполните `node scripts/build.js` — файлы скопируются в оба пакета (манифесты не перезаписываются).
+
+### Chrome / Edge / Brave / Opera
+
+1. Клонируйте репозиторий:
    ```bash
    git clone https://github.com/nnnnllop/us-autofill-extension.git
    ```
-2. Откройте `chrome://extensions`
+2. Откройте `chrome://extensions` (или `edge://extensions`)
 3. Включите **Режим разработчика**
-4. Нажмите **Загрузить распакованное расширение**
-5. Выберите папку `us-autofill-extension`
+4. **Загрузить распакованное расширение**
+5. Выберите папку **`chrome`** (не корень репозитория)
+
+### Firefox
+
+1. Откройте `about:debugging#/runtime/this-firefox`
+2. **Load Temporary Add-on…**
+3. Выберите файл **`firefox/manifest.json`**
+
+> Временная загрузка в Firefox сбрасывается при перезапуске. Для постоянной установки нужна подпись на [addons.mozilla.org](https://addons.mozilla.org).
 
 ### Обновление иконок (опционально)
 
 ```bash
-cd icons
+cd src/icons
 pip install pillow
 python generate_icons.py
+node ../../scripts/build.js
 ```
 
 ---
@@ -74,19 +94,20 @@ python generate_icons.py
 | **Email** | Сохраняется между сессиями и в профиле |
 | **📌 Закрепить** | Фиксирует адрес (улица, город, индекс) |
 | **Экспорт / Импорт** | Бэкап профилей в JSON |
-| **Заполнить** | Всё / Адрес / Карта. Перед ручным заполнением расширение пытается доинжектить content script в текущую вкладку, поэтому кнопка работает и на уже открытых вкладках после перезагрузки расширения |
+| **Заполнить** | Всё / Адрес / Карта / IBAN. Перед ручным заполнением расширение пытается доинжектить content script в текущую вкладку, поэтому кнопка работает и на уже открытых вкладках после перезагрузки расширения |
+| **IBAN** | Страна IBAN, генерация MOD-97, копирование, заполнение поля IBAN на странице |
 | **Копирование** | Клик по полю в панели — в буфер обмена |
 
 ### Настройки (футер popup)
 
 - **Автозаполнение** — при загрузке страницы; по умолчанию выключено, при включении показывается предупреждение о beta-статусе
-- **Режим авто** — всё / адрес / карта
+- **Режим авто** — всё / адрес / карта / IBAN
 - **Звук** — сигнал при успешном заполнении
 - **Компактный** — скрыть превью карты
 - **Кнопка на сайте** — плавающая кнопка **Заполнить** на checkout.stripe.com; можно скрыть
 - **Сводка** — строка `Профиль · MC · US · email`
 - **Dev-логи** — включить сбор, скачать `.txt`, скопировать в буфер или очистить
-- **Настроить** — изменить горячую клавишу (`chrome://extensions/shortcuts`)
+- **Настроить** — изменить горячую клавишу (Chrome: `chrome://extensions/shortcuts`, Firefox: `about:addons`)
 
 ---
 
@@ -105,18 +126,21 @@ python generate_icons.py
 
 ```
 us-autofill-extension/
-├── manifest.json       # Manifest V3
-├── background.js       # Адреса, карты, профили, API
-├── content.js          # Автозаполнение, Stripe FAB, retry
-├── content.css         # Подсветка полей, FAB
-├── popup/
-│   ├── popup.html
-│   ├── popup.css
-│   └── popup.js
-└── icons/
-    ├── icon16.png … icon128.png
-    ├── icon.svg
-    └── generate_icons.py
+├── src/                   # Общий исходный код (править здесь)
+│   ├── background.js      # Адреса, карты, IBAN, профили, API
+│   ├── content.js         # Автозаполнение, Stripe FAB, retry
+│   ├── content.css
+│   ├── popup/
+│   └── icons/
+├── chrome/                # Готовый пакет для Chromium
+│   └── manifest.json      # service_worker
+├── firefox/               # Готовый пакет для Firefox
+│   └── manifest.json      # background.scripts + gecko id
+├── scripts/
+│   ├── build.js           # src/ → chrome/ + firefox/
+│   └── build.ps1
+├── README.md
+└── LICENSE
 ```
 
 ---
@@ -141,6 +165,13 @@ us-autofill-extension/
 
 ## Changelog
 
+### 2.5.0
+
+- **IBAN-генератор** — отдельная панель и режим заполнения «IBAN»; страны DE/FR/NL/IT/ES/PL/GB/AT/BE/CH/SE, проверка MOD-97.
+- Кнопка **Заполнить → IBAN**, авто-режим «Только IBAN», копирование и «Новый» IBAN.
+- Генератор карт и BIN **без изменений** — карта и IBAN работают параллельно.
+- **Структура репозитория**: `src/` (общий код), `chrome/` и `firefox/` (готовые пакеты), `scripts/build.js`.
+- Chrome: `service_worker`. Firefox: `background.scripts` + gecko id.
 ### 2.4.2
 
 - Реализовано принудительное перезаполнение полей: при ручном клике на кнопку «Заполнить» в popup или на плавающую кнопку «Заполнить» (FAB) на Stripe-странице, расширение теперь перезаписывает все поля, даже если они уже заполнены. При автоматическом автозаполнении (на загрузке страницы) пустые поля заполняются без перезаписи введенных пользователем данных.
@@ -191,13 +222,20 @@ us-autofill-extension/
 ## Разработка
 
 ```bash
+# Правки — только в src/
+# Сборка пакетов chrome/ и firefox/
+node scripts/build.js
+
 # Проверка синтаксиса
-node --check background.js
-node --check content.js
-node --check popup/popup.js
+node --check src/background.js
+node --check src/content.js
+node --check src/popup/popup.js
 ```
 
-После изменений: `chrome://extensions` → **Обновить** на карточке AutoFill.
+После изменений:
+1. `node scripts/build.js`
+2. Chrome: `chrome://extensions` → **Обновить**
+3. Firefox: снова **Load Temporary Add-on…** (или Reload на странице debugging)
 
 ---
 

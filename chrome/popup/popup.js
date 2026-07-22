@@ -13,6 +13,9 @@ let currentCountry = "US";
 let currentCurrency = "USD";
 let lastAddress = null;
 let lastCard = null;
+let lastIban = null;
+let currentIbanCountry = "DE";
+let currentBrowser = "chrome";
 let profiles = [];
 let activeProfileId = "default";
 let addressPinned = false;
@@ -182,6 +185,36 @@ function renderBinPresetsList(presets, activeBin) {
   if (activeBin) highlightBinPreset(activeBin);
 }
 
+function renderIbanCountriesList(countries, selectedCode) {
+  const sel = $("ibanCountrySelect");
+  if (!sel || !countries) return;
+  sel.innerHTML = "";
+  countries.forEach(c => {
+    const opt = document.createElement("option");
+    opt.value = c.code;
+    opt.textContent = `${c.flag} ${c.code} — ${c.name}`;
+    if (c.code === selectedCode) opt.selected = true;
+    sel.appendChild(opt);
+  });
+}
+
+function renderIban(iban) {
+  lastIban = iban || null;
+  if (!iban) {
+    safeSetText("ibanValue", "—");
+    safeSetText("ibanCountry", "—");
+    safeSetText("ibanValid", "—");
+    return;
+  }
+  safeSetText("ibanValue", iban.formatted || iban.iban || "—");
+  const countryLabel = iban.flag
+    ? `${iban.flag} ${iban.country || ""}`
+    : (iban.country || "—");
+  safeSetText("ibanCountry", countryLabel.trim() || "—");
+  safeSetText("ibanValid", iban.valid ? "✓ валиден" : "✗ ошибка");
+  if (iban.country) currentIbanCountry = iban.country;
+}
+
 const STATE_LABELS = {
   US: "Штат", GB: "Графство", DE: "Земля", FR: "Регион",
   CA: "Провинция", AU: "Штат", NL: "Провинция", IT: "Регион",
@@ -196,8 +229,8 @@ const REPORT_STATUS_LABELS = {
   iframe: "↗"
 };
 
-const fillButtons = ["btnFillAll", "btnFillAddress", "btnFillCard"].map($).filter(Boolean);
-const refreshButtons = ["btnRefreshAddress", "btnRefreshCard", "btnRefreshAll"].map($).filter(Boolean);
+const fillButtons = ["btnFillAll", "btnFillAddress", "btnFillCard", "btnFillIban"].map($).filter(Boolean);
+const refreshButtons = ["btnRefreshAddress", "btnRefreshCard", "btnRefreshIban", "btnRefreshAll"].map($).filter(Boolean);
 
 function safeSetText(id, text) {
   const el = $(id);
@@ -471,6 +504,7 @@ function setupCopyOnClick() {
 
       if (rawId === "cardNumberRaw" && lastCard?.number) text = lastCard.number;
       else if (rawId === "cardCVVRaw" && lastCard?.cvv) text = lastCard.cvv;
+      else if (rawId === "ibanRaw" && lastIban?.iban) text = lastIban.iban;
       else if (id) {
         const el = $(id);
         text = el?.textContent?.trim() || "";
@@ -756,6 +790,32 @@ async function refreshCardOnly(silent) {
   });
 }
 
+async function refreshIbanOnly(silent) {
+  const btn = $("btnRefreshIban");
+  if (btn) btn.disabled = true;
+  if (!silent) setStatus("", "Новый IBAN...");
+
+  const country = $("ibanCountrySelect")?.value || currentIbanCountry;
+  const res = await sendBg("generateIban", { country });
+  if (btn) btn.disabled = false;
+
+  if (res?.error) {
+    if (!silent) setStatus("error", res.error === "timeout" ? "Таймаут IBAN" : "Ошибка IBAN");
+    return;
+  }
+  if (!res?.iban) {
+    if (!silent) setStatus("error", "Ошибка IBAN");
+    return;
+  }
+
+  renderIban(res.iban);
+  if ($("ibanCountrySelect") && res.iban.country) {
+    $("ibanCountrySelect").value = res.iban.country;
+    currentIbanCountry = res.iban.country;
+  }
+  if (!silent) setStatus("active", "IBAN обновлён ✅");
+}
+
 async function refreshAll() {
   setRefreshDisabled(true);
   setButtonsDisabled(true);
@@ -771,11 +831,13 @@ async function refreshAll() {
     renderAddress(lastAddress);
   }
 
+  await refreshIbanOnly(true);
+
   const res2 = await sendBg("startCardCheck");
   if (!res2?.started) {
     setRefreshDisabled(false);
     setButtonsDisabled(false);
-    setStatus("active", res?.address ? "Адрес обновлён" : "Ошибка обновления");
+    setStatus("active", res?.address ? "Адрес и IBAN обновлены" : "Ошибка обновления");
     return;
   }
 
@@ -807,8 +869,13 @@ function copyCard() {
   copyText(`${lastCard.number}|${lastCard.month}|${lastCard.year}|${lastCard.cvv}`, "Карта");
 }
 
+function copyIban() {
+  if (!lastIban?.iban) return;
+  copyText(lastIban.iban, "IBAN");
+}
+
 async function fillPage(mode) {
-  const labels = { all: "Всё", address: "Адрес", card: "Карта" };
+  const labels = { all: "Всё", address: "Адрес", card: "Карта", iban: "IBAN" };
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tabs[0]?.id) return;
   const tabId = tabs[0].id;
@@ -837,18 +904,22 @@ async function initPopup() {
     return;
   }
 
-  safeSetText("versionTag", `v${boot.version || "2.3.1"}`);
+  safeSetText("versionTag", `v${boot.version || "2.5.0"}`);
   profiles = boot.profiles || [];
   activeProfileId = boot.activeId || profiles[0]?.id || "default";
   currentCountry = boot.country || "US";
   currentCurrency = boot.currency || "USD";
+  currentBrowser = boot.browser || "chrome";
   lastAddress = boot.address || null;
   lastCard = boot.card || null;
+  lastIban = boot.iban || null;
+  currentIbanCountry = boot.ibanCountry || boot.iban?.country || "DE";
 
   renderProfiles(activeProfileId);
   renderCountriesList(boot.countries, currentCountry);
   renderCurrenciesList(boot.currencies, currentCurrency);
   renderBinPresetsList(boot.presets, boot.bin);
+  renderIbanCountriesList(boot.ibanCountries, currentIbanCountry);
   applySettings(boot.settings);
   updateProfileSummary();
 
@@ -859,6 +930,7 @@ async function initPopup() {
 
   if (lastAddress) renderAddress(lastAddress);
   if (lastCard) renderCard(lastCard);
+  if (lastIban) renderIban(lastIban);
   updatePinUI(boot.pinned);
   if (shortcutKbd && boot.shortcut) shortcutKbd.textContent = boot.shortcut;
   if ($("devModeToggle")) $("devModeToggle").checked = !!boot.devMode;
@@ -889,11 +961,21 @@ initPopup().catch(() => setStatus("error", "Ошибка инициализац�
 $("btnFillAll")?.addEventListener("click", () => fillPage("all"));
 $("btnFillAddress")?.addEventListener("click", () => fillPage("address"));
 $("btnFillCard")?.addEventListener("click", () => fillPage("card"));
+$("btnFillIban")?.addEventListener("click", () => fillPage("iban"));
 $("btnRefreshAddress")?.addEventListener("click", refreshAddressOnly);
 $("btnRefreshCard")?.addEventListener("click", () => refreshCardOnly(false));
+$("btnRefreshIban")?.addEventListener("click", () => refreshIbanOnly(false));
 $("btnRefreshAll")?.addEventListener("click", refreshAll);
 $("btnCopyAddress")?.addEventListener("click", copyAddress);
 $("btnCopyCard")?.addEventListener("click", copyCard);
+$("btnCopyIban")?.addEventListener("click", copyIban);
+
+$("ibanCountrySelect")?.addEventListener("change", async () => {
+  const code = $("ibanCountrySelect").value;
+  currentIbanCountry = code;
+  await sendBg("setIbanCountry", { country: code }, 5000);
+  await refreshIbanOnly(false);
+});
 
 $("btnPinAddress")?.addEventListener("click", async () => {
   const action = addressPinned ? "unpinAddress" : "pinAddress";
@@ -1147,7 +1229,11 @@ $("showSummaryToggle")?.addEventListener("change", () => {
 $("btnDismissOnboarding")?.addEventListener("click", dismissOnboarding);
 
 $("btnOpenShortcuts")?.addEventListener("click", () => {
-  chrome.tabs.create({ url: "chrome://extensions/shortcuts" });
+  // Chrome/Edge: shortcuts page. Firefox: about:addons (Manage Extension Shortcuts).
+  const url = currentBrowser === "firefox"
+    ? "about:addons"
+    : "chrome://extensions/shortcuts";
+  chrome.tabs.create({ url });
 });
 
 chrome.runtime.sendMessage({ action: "getBin" }, res => {

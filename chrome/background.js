@@ -27,10 +27,13 @@ const ONBOARDING_DONE_KEY = "onboardingDone";
 const DEV_LOGS_KEY = "devLogs";
 const MAX_PROFILES = 50;
 const MAX_DEV_LOGS = 500;
-const EXT_VERSION = "2.4.2";
+const EXT_VERSION = "2.5.0";
 
 const DEFAULT_BIN = "5154620022";
 const BIN_STORAGE_KEY = "user_bin";
+const IBAN_CACHE_KEY = "cached_iban";
+const IBAN_COUNTRY_KEY = "ibanCountry";
+const DEFAULT_IBAN_COUNTRY = "DE";
 
 const BIN_PRESETS = [
   { id: "mc", label: "Mastercard", short: "MC", bin: "5154620022", type: "mastercard" },
@@ -644,6 +647,177 @@ async function generateFullCard() {
     bin,
     raw: `${number}|${expiry.month}|${expiry.year}|${cvv}`
   };
+}
+
+/* ═══════════════════════════════════════════════════════
+   IBAN GENERATOR (ISO 13616 / MOD-97)
+   ═══════════════════════════════════════════════════════ */
+
+const IBAN_CONFIG = {
+  DE: {
+    code: "DE", name: "Germany", flag: "🇩🇪", length: 22,
+    bban: () => randomDigits(8) + randomDigits(10)
+  },
+  FR: {
+    code: "FR", name: "France", flag: "🇫🇷", length: 27,
+    bban: () => randomDigits(5) + randomDigits(5) + randomDigits(11) + randomDigits(2)
+  },
+  NL: {
+    code: "NL", name: "Netherlands", flag: "🇳🇱", length: 18,
+    bban: () => randomLetters(4) + randomDigits(10)
+  },
+  IT: {
+    code: "IT", name: "Italy", flag: "🇮🇹", length: 27,
+    bban: () => randomLetters(1) + randomDigits(5) + randomDigits(5) + randomDigits(12)
+  },
+  ES: {
+    code: "ES", name: "Spain", flag: "🇪🇸", length: 24,
+    bban: () => randomDigits(4) + randomDigits(4) + randomDigits(2) + randomDigits(10)
+  },
+  PL: {
+    code: "PL", name: "Poland", flag: "🇵🇱", length: 28,
+    bban: () => randomDigits(8) + randomDigits(16)
+  },
+  GB: {
+    code: "GB", name: "United Kingdom", flag: "🇬🇧", length: 22,
+    bban: () => randomLetters(4) + randomDigits(6) + randomDigits(8)
+  },
+  AT: {
+    code: "AT", name: "Austria", flag: "🇦🇹", length: 20,
+    bban: () => randomDigits(5) + randomDigits(11)
+  },
+  BE: {
+    code: "BE", name: "Belgium", flag: "🇧🇪", length: 16,
+    bban: () => randomDigits(3) + randomDigits(7) + randomDigits(2)
+  },
+  CH: {
+    code: "CH", name: "Switzerland", flag: "🇨🇭", length: 21,
+    bban: () => randomDigits(5) + randomDigits(12)
+  },
+  SE: {
+    code: "SE", name: "Sweden", flag: "🇸🇪", length: 24,
+    bban: () => randomDigits(3) + randomDigits(17)
+  }
+};
+
+const IBAN_COUNTRY_FROM_ADDRESS = {
+  DE: "DE", FR: "FR", NL: "NL", IT: "IT", ES: "ES", PL: "PL", GB: "GB"
+};
+
+function randomDigits(n) {
+  let s = "";
+  for (let i = 0; i < n; i++) s += Math.floor(Math.random() * 10);
+  return s;
+}
+
+function randomLetters(n) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  let s = "";
+  for (let i = 0; i < n; i++) s += alphabet[Math.floor(Math.random() * 26)];
+  return s;
+}
+
+function ibanCharToDigits(ch) {
+  if (ch >= "0" && ch <= "9") return ch;
+  return String(ch.toUpperCase().charCodeAt(0) - 55);
+}
+
+function mod97(numericStr) {
+  let remainder = 0;
+  for (let i = 0; i < numericStr.length; i++) {
+    remainder = (remainder * 10 + (numericStr.charCodeAt(i) - 48)) % 97;
+  }
+  return remainder;
+}
+
+function ibanToNumeric(str) {
+  let out = "";
+  for (let i = 0; i < str.length; i++) out += ibanCharToDigits(str[i]);
+  return out;
+}
+
+function computeIbanCheckDigits(countryCode, bban) {
+  const rearranged = bban + countryCode + "00";
+  const rem = mod97(ibanToNumeric(rearranged));
+  return String(98 - rem).padStart(2, "0");
+}
+
+function validateIban(iban) {
+  const clean = String(iban || "").replace(/\s+/g, "").toUpperCase();
+  if (!/^[A-Z]{2}\d{2}[A-Z0-9]+$/.test(clean)) return false;
+  const cfg = IBAN_CONFIG[clean.slice(0, 2)];
+  if (cfg && clean.length !== cfg.length) return false;
+  const rearranged = clean.slice(4) + clean.slice(0, 4);
+  return mod97(ibanToNumeric(rearranged)) === 1;
+}
+
+function formatIban(iban) {
+  return String(iban || "").replace(/\s+/g, "").replace(/(.{4})/g, "$1 ").trim();
+}
+
+function getIbanCountriesList() {
+  return Object.values(IBAN_CONFIG).map(c => ({
+    code: c.code,
+    name: c.name,
+    flag: c.flag,
+    length: c.length
+  }));
+}
+
+async function getIbanCountry() {
+  const data = await chrome.storage.local.get(IBAN_COUNTRY_KEY);
+  const stored = data[IBAN_COUNTRY_KEY];
+  if (stored && IBAN_CONFIG[stored]) return stored;
+  const addressCountry = await getSelectedCountry();
+  return IBAN_COUNTRY_FROM_ADDRESS[addressCountry] || DEFAULT_IBAN_COUNTRY;
+}
+
+async function setIbanCountry(code) {
+  const upper = String(code || "").toUpperCase();
+  if (!IBAN_CONFIG[upper]) return getIbanCountry();
+  await chrome.storage.local.set({ [IBAN_COUNTRY_KEY]: upper });
+  return upper;
+}
+
+function generateIbanForCountry(countryCode) {
+  const cfg = IBAN_CONFIG[countryCode] || IBAN_CONFIG[DEFAULT_IBAN_COUNTRY];
+  const bban = cfg.bban();
+  const check = computeIbanCheckDigits(cfg.code, bban);
+  const iban = `${cfg.code}${check}${bban}`;
+  return {
+    iban,
+    formatted: formatIban(iban),
+    country: cfg.code,
+    countryName: cfg.name,
+    flag: cfg.flag,
+    length: iban.length,
+    valid: validateIban(iban),
+    bban
+  };
+}
+
+async function getCachedIban() {
+  const data = await chrome.storage.local.get(IBAN_CACHE_KEY);
+  const cached = data[IBAN_CACHE_KEY];
+  if (cached?.iban && validateIban(cached.iban)) return cached;
+  return null;
+}
+
+async function generateAndCacheIban(countryCode) {
+  const code = countryCode && IBAN_CONFIG[countryCode]
+    ? countryCode
+    : await getIbanCountry();
+  await setIbanCountry(code);
+  const result = generateIbanForCountry(code);
+  await chrome.storage.local.set({ [IBAN_CACHE_KEY]: result });
+  await addDevLog("info", "Сгенерирован IBAN", `${result.country} ${result.formatted}`);
+  return result;
+}
+
+async function getOrCreateIban() {
+  const cached = await getCachedIban();
+  if (cached) return cached;
+  return generateAndCacheIban();
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -1278,12 +1452,13 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 async function getPopupBootstrap() {
-  const [{ profiles, activeId }, country, currency, email, bin, settingsData, devLogsData] = await Promise.all([
+  const [{ profiles, activeId }, country, currency, email, bin, ibanCountry, settingsData, devLogsData] = await Promise.all([
     getProfiles(),
     getSelectedCountry(),
     getSelectedCurrency(),
     getUserEmail(),
     getBin(),
+    getIbanCountry(),
     chrome.storage.local.get([
       DEV_MODE_KEY, SOUND_MUTED_KEY, COMPACT_MODE_KEY,
       SHOW_PROFILE_SUMMARY_KEY, STRIPE_FAB_KEY, ONBOARDING_DONE_KEY
@@ -1291,10 +1466,11 @@ async function getPopupBootstrap() {
     chrome.storage.local.get(DEV_LOGS_KEY)
   ]);
 
-  const [addr, card, pinned] = await Promise.all([
+  const [addr, card, pinned, iban] = await Promise.all([
     readStoredAddress(country),
     getCachedCard(),
-    getPinnedAddress()
+    getPinnedAddress(),
+    getOrCreateIban()
   ]);
 
   const shortcut = await new Promise(resolve => {
@@ -1313,12 +1489,16 @@ async function getPopupBootstrap() {
     currencies: getCurrenciesList(),
     address: await mergeAddressEmail(addr),
     card,
+    iban,
+    ibanCountry,
+    ibanCountries: getIbanCountriesList(),
     pinned: !!(pinned && pinned.pinnedCountry === country),
     email,
     bin,
     countries: getCountriesList(),
     presets: BIN_PRESETS,
     shortcut,
+    browser: detectBrowser(),
     devMode: !!settingsData[DEV_MODE_KEY],
     devLogCount: Array.isArray(devLogsData[DEV_LOGS_KEY]) ? devLogsData[DEV_LOGS_KEY].length : 0,
     settings: {
@@ -1329,6 +1509,17 @@ async function getPopupBootstrap() {
       onboardingDone: !!settingsData[ONBOARDING_DONE_KEY]
     }
   };
+}
+
+function detectBrowser() {
+  try {
+    const ua = (globalThis.navigator && navigator.userAgent) || "";
+    if (/Firefox\//i.test(ua)) return "firefox";
+    if (/Edg\//i.test(ua)) return "edge";
+    if (/OPR\//i.test(ua) || /Opera\//i.test(ua)) return "opera";
+    if (/Chrome\//i.test(ua) || /Chromium\//i.test(ua)) return "chrome";
+  } catch (_) {}
+  return "chrome";
 }
 
 function getCountriesList() {
@@ -1568,6 +1759,42 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.action === "getIbanCountries") {
+    sendResponse({ countries: getIbanCountriesList() });
+    return true;
+  }
+
+  if (msg.action === "getIbanCountry") {
+    getIbanCountry().then(code => {
+      const cfg = IBAN_CONFIG[code];
+      sendResponse({ code, name: cfg?.name, flag: cfg?.flag });
+    });
+    return true;
+  }
+
+  if (msg.action === "setIbanCountry") {
+    setIbanCountry(msg.country).then(code => {
+      const cfg = IBAN_CONFIG[code];
+      sendResponse({ code, name: cfg?.name, flag: cfg?.flag });
+    });
+    return true;
+  }
+
+  if (msg.action === "getIban") {
+    getOrCreateIban().then(iban => sendResponse({ iban }));
+    return true;
+  }
+
+  if (msg.action === "generateIban") {
+    generateAndCacheIban(msg.country).then(iban => sendResponse({ iban }));
+    return true;
+  }
+
+  if (msg.action === "getBrowser") {
+    sendResponse({ browser: detectBrowser() });
+    return true;
+  }
+
   if (msg.action === "getDevMode") {
     chrome.storage.local.get(DEV_MODE_KEY, d => sendResponse({ devMode: !!d[DEV_MODE_KEY] }));
     return true;
@@ -1641,14 +1868,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       try {
         const country = await getSelectedCountry();
         const currency = await getSelectedCurrency();
-        const [addr, card, pinned] = await Promise.all([
-          getCachedAddress(country), getCachedCard(), getPinnedAddress()
+        const [addr, card, pinned, iban] = await Promise.all([
+          getCachedAddress(country), getCachedCard(), getPinnedAddress(), getOrCreateIban()
         ]);
         const address = await mergeAddressEmail(addr);
         const d = await chrome.storage.local.get([DEV_MODE_KEY, SOUND_MUTED_KEY]);
         sendResponse({
           address,
           card,
+          iban,
           country,
           currency,
           devMode: !!d[DEV_MODE_KEY],
@@ -1682,16 +1910,18 @@ function mergeFillResults(results) {
 async function getFillPayload() {
   const country = await getSelectedCountry();
   const currency = await getSelectedCurrency();
-  const [addr, card, pinned] = await Promise.all([
+  const [addr, card, pinned, iban] = await Promise.all([
     getCachedAddress(country),
     getCachedCard(),
-    getPinnedAddress()
+    getPinnedAddress(),
+    getOrCreateIban()
   ]);
   const address = await mergeAddressEmail(addr);
   const d = await chrome.storage.local.get([DEV_MODE_KEY, SOUND_MUTED_KEY]);
   return {
     address,
     card,
+    iban,
     country,
     currency,
     devMode: !!d[DEV_MODE_KEY],
